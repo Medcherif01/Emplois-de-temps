@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Clock,
   Coffee,
+  FileSpreadsheet,
   Layers,
   LayoutGrid,
   Lock,
@@ -15,6 +16,7 @@ import {
   Plus,
   Printer,
   RefreshCw,
+  RotateCcw,
   Settings,
   ShieldCheck,
   Sliders,
@@ -102,6 +104,10 @@ interface AscTimetablesRibbonAndDialogsProps {
   onPrintReport: (
     mode: 'teachers_load' | 'classes_load' | 'subjects_load' | 'ensemble'
   ) => void;
+  canUndo?: boolean;
+  onUndo?: () => void;
+  undoCount?: number;
+  onExportExcel?: (mode: 'teachers_load' | 'classes_load' | 'ensemble') => void;
   darkMode?: boolean;
 }
 
@@ -133,6 +139,10 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
   onRunAutoCompleteAndOptimize,
   onSwitchToTab,
   onPrintReport,
+  canUndo = false,
+  onUndo,
+  undoCount = 0,
+  onExportExcel,
   darkMode = false,
 }) => {
   // 1. State for Co-Teaching (Enseignant + Assistant) modal
@@ -315,8 +325,21 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
         }`}
       >
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-2">
-          {/* Left group: Core aSc Data & Co-Teaching Buttons */}
+          {/* Left group: Précédent (Undo), Core aSc Data & Co-Teaching Buttons */}
           <div className="flex flex-wrap items-center gap-1.5">
+            {onUndo && (
+              <button
+                type="button"
+                onClick={onUndo}
+                disabled={!canUndo}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:hover:bg-rose-600 text-white shadow-xs transition-all cursor-pointer"
+                title="Précédent : Retourner en arrière / Annuler la dernière action (Ctrl+Z)"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-rose-100" />
+                <span>↩ Précédent {undoCount > 0 ? `(${undoCount})` : ''}</span>
+              </button>
+            )}
+
             <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-1 rounded bg-slate-800 text-amber-300 mr-1">
               Barre aSc TimeTables
             </span>
@@ -401,6 +424,18 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
               <Layers className="w-3.5 h-3.5 text-indigo-200" />
               <span>Load Teachers & Classes</span>
             </button>
+
+            {onExportExcel && (
+              <button
+                type="button"
+                onClick={() => onExportExcel('teachers_load')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs cursor-pointer"
+                title="Exporter les tableaux vers Excel avec le même design, couleurs et polices"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Excel (Design)</span>
+              </button>
+            )}
 
             <button
               type="button"

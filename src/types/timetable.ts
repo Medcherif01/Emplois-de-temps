@@ -9,9 +9,12 @@ export type SectionType =
 
 export type SchoolCategory =
   | 'ALL'
-  | 'French_Section'
+  | 'KG_Maternelle'
+  | 'Primaire'
+  | 'Secondaire'
   | 'Boys_Section'
   | 'Girls_Section'
+  | 'French_Section'
   | 'American_Section'
   | 'KG_Primary';
 

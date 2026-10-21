@@ -4,6 +4,7 @@ import {
   ArrowLeftRight,
   CheckCircle2,
   Eye,
+  FileSpreadsheet,
   Filter,
   GitMerge,
   Layers,
@@ -53,6 +54,7 @@ interface MasterEnsembleMatrixProps {
     period: number;
   }) => void;
   onPrintEnsemble: () => void;
+  onExportExcelEnsemble?: () => void;
   darkMode?: boolean;
 }
 
@@ -66,6 +68,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
   onEditCell,
   onOpenJointModal,
   onPrintEnsemble,
+  onExportExcelEnsemble,
   darkMode = false,
 }) => {
   const [selectedSource, setSelectedSource] = useState<{
@@ -204,11 +207,13 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
             {(
               [
                 'ALL',
-                'French_Section',
+                'KG_Maternelle',
+                'Primaire',
+                'Secondaire',
                 'Boys_Section',
                 'Girls_Section',
+                'French_Section',
                 'American_Section',
-                'KG_Primary',
               ] as SchoolCategory[]
             ).map((cat) => {
               const count = classes.filter((c) =>
@@ -280,6 +285,18 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                 Séances Intercalées ({intercalatedSessions.length})
               </span>
             </button>
+
+            {onExportExcelEnsemble && (
+              <button
+                type="button"
+                onClick={onExportExcelEnsemble}
+                className="px-2.5 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white rounded flex items-center gap-1.5 shadow-xs cursor-pointer"
+                title="Exporter la Vue Ensemble vers Excel avec le même design et les couleurs"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <span>Excel Ensemble</span>
+              </button>
+            )}
 
             <button
               type="button"

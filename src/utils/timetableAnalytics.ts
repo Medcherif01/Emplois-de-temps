@@ -19,26 +19,30 @@ import { isCoreSubject, SubjectConfig } from '../engine/cspEngine';
 
 export const CATEGORY_LABELS: Record<SchoolCategory, string> = {
   ALL: 'Toutes les Sections (35 Classes)',
-  French_Section: 'French Section (Maternelle PS-GS, PP1-PP5, PEI & DP)',
-  Boys_Section: 'Boys Section (G4-G12 Boys, Am.Boys, PEI-DP Garçons)',
-  Girls_Section: 'Girls Section (G4-G12 Girls, Am.Girls, PEI-DP Filles)',
-  American_Section: 'American Section (10-12 Am.Girls & Am.Boys)',
+  KG_Maternelle: 'Maternelle / KG (Pre-KG, KG1, KG2, KG3 / PS, MS, GS)',
+  Primaire: 'Primaire / Primary (G1 à G6, PP1 à PP5)',
+  Secondaire: 'Secondaire (Collège, Lycée, DP1-DP2, G7-G12 Garçons & Filles)',
+  Boys_Section: 'Section Garçons / Boys Section (G4-G12 Garçons, PEI & DP Boys)',
+  Girls_Section: 'Section Filles / Girls Section (G4-G12 Filles, PEI & DP Girls)',
+  French_Section: 'Section Française (PS-GS, PP1-PP5, PEI1-PEI4, DP1-DP2)',
+  American_Section: 'American Section (High School 10-12 Am.Boys & Am.Girls)',
   KG_Primary: 'KG & Primary International (Pre-KG à G6)',
 };
 
 export const CATEGORY_SHORT_LABELS: Record<SchoolCategory, string> = {
   ALL: 'Toutes Sections',
-  French_Section: 'French Section',
+  KG_Maternelle: 'Maternelle (KG)',
+  Primaire: 'Primaire',
+  Secondaire: 'Secondaire',
   Boys_Section: 'Boys Section',
   Girls_Section: 'Girls Section',
+  French_Section: 'Section Française',
   American_Section: 'American Section',
   KG_Primary: 'KG & Primary',
 };
 
 /**
  * Checks whether a class belongs to a requested SchoolCategory.
- * Note: A class like "PEI1 Garçons" belongs to both French_Section and Boys_Section.
- * A class like "11 Am.Girls" belongs to both Girls_Section and American_Section.
  */
 export function classMatchesCategory(
   cls: SchoolClass,
@@ -49,13 +53,55 @@ export function classMatchesCategory(
 
   const n = cls.name.toLowerCase();
 
+  const isKG =
+    cls.section === 'KG' ||
+    cls.section === 'KG3_GS' ||
+    n.includes('pre-kg') ||
+    n.includes('kg1') ||
+    n.includes('kg2') ||
+    n.includes('kg3') ||
+    n === 'ps' ||
+    n === 'ms' ||
+    n === 'gs';
+
+  const isPrimaire =
+    cls.section === 'Primary' ||
+    n.startsWith('pp') ||
+    n.includes('g1') ||
+    n.includes('g2') ||
+    n.includes('g3') ||
+    n.includes('g4') ||
+    n.includes('g5') ||
+    n.includes('g6') ||
+    n.includes('cp') ||
+    n.includes('ce1') ||
+    n.includes('ce2') ||
+    n.includes('cm1') ||
+    n.includes('cm2');
+
+  const isSecondaire =
+    cls.section === 'Secondary_Girls' ||
+    cls.section === 'Secondary_Boys' ||
+    n.startsWith('pei') ||
+    n.startsWith('dp') ||
+    n.includes('g7') ||
+    n.includes('g8') ||
+    n.includes('g9') ||
+    n.includes('g10') ||
+    n.includes('g11') ||
+    n.includes('g12') ||
+    n.includes('college') ||
+    n.includes('lycee');
+
   const isFrench =
     n === 'ps' ||
     n === 'ms' ||
     n === 'gs' ||
     n.startsWith('pp') ||
     n.startsWith('pei') ||
-    n.startsWith('dp');
+    n.startsWith('dp') ||
+    n.includes('français') ||
+    n.includes('francais');
 
   const isBoys =
     n.includes('boys') ||
@@ -66,19 +112,21 @@ export function classMatchesCategory(
   const isAmerican =
     n.includes('am.') || n.includes('american');
 
-  const isKGPrimary =
-    cls.section === 'KG' ||
-    cls.section === 'KG3_GS' ||
-    cls.section === 'Primary';
-
   const isGirls =
     n.includes('girls') ||
-    (!isBoys &&
-      (cls.section === 'Secondary_Girls' ||
-        n.startsWith('pei') ||
-        n.startsWith('dp')));
+    n.includes('filles') ||
+    cls.section === 'Secondary_Girls' ||
+    ((n.startsWith('pei') || n.startsWith('dp')) && !isBoys);
+
+  const isKGPrimary = isKG || isPrimaire;
 
   switch (category) {
+    case 'KG_Maternelle':
+      return isKG;
+    case 'Primaire':
+      return isPrimaire;
+    case 'Secondaire':
+      return isSecondaire;
     case 'French_Section':
       return isFrench;
     case 'Boys_Section':
@@ -1543,7 +1591,55 @@ export function generatePrintableLoadReportHtml(
             `;
           })
           .join('')}
-      </tbody>
+      ${teacherRows
+        .filter((r) => r.lineItems.length > 0)
+        .map((r) => {
+          const span = r.lineItems.length;
+          const rowsHtml = r.lineItems
+            .map((item, idx) => {
+              const st = getSubjectVisualStyle(item.subject);
+              return `
+            <tr>
+              ${
+                idx === 0
+                  ? `<td rowspan="${span}" class="merged-left">
+                      <div class="merged-title">${esc(r.teacherName)}</div>
+                      <div class="merged-sub">${esc(r.sectionLabel)}</div>
+                    </td>`
+                  : ''
+              }
+              <td style="font-weight: 700;">${esc(item.classesLabel)}</td>
+              <td style="color: #334155;">${esc(item.groupLabel)}</td>
+              <td style="text-align: center; font-weight: 700;">
+                <span style="display:inline-block;padding:2px 8px;border-radius:3px;background:${
+                  st.bgHex
+                };color:${st.textHex};border:1px solid ${st.borderHex};">
+                  ${esc(item.subject)}
+                </span>
+              </td>
+              <td style="text-align: center; font-weight: 800; font-family: monospace; font-size: 13px;">
+                ${item.periods}
+              </td>
+              ${
+                idx === 0
+                  ? `<td rowspan="${span}" class="merged-total">
+                      <div class="total-num">${r.totalPeriods}</div>
+                      <div class="total-cap">Max: ${r.maxPeriods}p</div>
+                    </td>`
+                  : ''
+              }
+            </tr>`;
+            })
+            .join('');
+
+          return `
+            <tbody class="teacher-block">
+              <tr class="block-sep"><td colspan="6"></td></tr>
+              ${rowsHtml}
+            </tbody>
+          `;
+        })
+        .join('')}
     </table>`;
   } else if (mode === 'classes_load') {
     tableHtml = `
@@ -1552,64 +1648,72 @@ export function generatePrintableLoadReportHtml(
         <tr>
           <th style="width: 160px;">Classe</th>
           <th style="width: 180px;">Matière</th>
-          <th>Professeur / Enseignant</th>
+          <th>Professeur Principal & Assistant</th>
           <th style="width: 190px;">Groupe / Mode</th>
           <th style="width: 150px; text-align: center;">Nombre par semaine</th>
           <th style="width: 130px; text-align: center;">Somme des séances</th>
         </tr>
       </thead>
-      <tbody>
-        ${classBlocks
-          .filter((b) => b.items.length > 0)
-          .map((b) => {
-            const span = b.items.length;
-            const rowsHtml = b.items
-              .map((item, idx) => {
-                const st = getSubjectVisualStyle(item.subject);
-                return `
-              <tr>
-                ${
-                  idx === 0
-                    ? `<td rowspan="${span}" class="merged-left">
-                        <div class="merged-title">${esc(b.className)}</div>
-                        <div class="merged-sub">${esc(b.categoryLabel)} · ${esc(
-                        b.room
-                      )}</div>
-                      </td>`
-                    : ''
-                }
-                <td style="font-weight: 700;">
-                  <span style="display:inline-block;width:10px;height:10px;background:${
-                    st.bgHex
-                  };border:1px solid ${
-                  st.borderHex
-                };border-radius:2px;margin-right:6px;vertical-align:middle;"></span>
-                  ${esc(item.subject)}
-                </td>
-                <td style="font-weight: 600;">${esc(item.teacher)}</td>
-                <td style="color: #475569;">${esc(item.groupLabel)}</td>
-                <td style="text-align: center; font-weight: 800; font-family: monospace; font-size: 13px;">
-                  ${item.periods}
-                </td>
-                ${
-                  idx === 0
-                    ? `<td rowspan="${span}" class="merged-total">
-                        <div class="total-num">${b.totalPeriods}</div>
-                        <div class="total-cap">Cible: ${b.targetWeeklyCapacity}p</div>
-                      </td>`
-                    : ''
-                }
-              </tr>`;
-              })
-              .join('');
+      ${classBlocks
+        .filter((b) => b.items.length > 0)
+        .map((b) => {
+          const span = b.items.length;
+          const rowsHtml = b.items
+            .map((item, idx) => {
+              const st = getSubjectVisualStyle(item.subject);
+              return `
+            <tr>
+              ${
+                idx === 0
+                  ? `<td rowspan="${span}" class="merged-left">
+                      <div class="merged-title">${esc(b.className)}</div>
+                      <div class="merged-sub">${esc(b.categoryLabel)} · ${esc(
+                      b.room
+                    )}</div>
+                    </td>`
+                  : ''
+              }
+              <td style="font-weight: 700;">
+                <span style="display:inline-block;width:10px;height:10px;background:${
+                  st.bgHex
+                };border:1px solid ${
+                st.borderHex
+              };border-radius:2px;margin-right:6px;vertical-align:middle;"></span>
+                ${esc(item.subject)}
+              </td>
+              <td style="font-weight: 600;">
+                ${esc(item.teacher)}${
+                item.assistantTeacher
+                  ? ` <span style="color:#86198f;font-weight:700;">(+ Ass. ${esc(
+                      item.assistantTeacher
+                    )})</span>`
+                  : ''
+              }
+              </td>
+              <td style="color: #475569;">${esc(item.groupLabel)}</td>
+              <td style="text-align: center; font-weight: 800; font-family: monospace; font-size: 13px;">
+                ${item.periods}
+              </td>
+              ${
+                idx === 0
+                  ? `<td rowspan="${span}" class="merged-total">
+                      <div class="total-num">${b.totalPeriods}</div>
+                      <div class="total-cap">Cible: ${b.targetWeeklyCapacity}p</div>
+                    </td>`
+                  : ''
+              }
+            </tr>`;
+            })
+            .join('');
 
-            return `
+          return `
+            <tbody class="class-block">
               <tr class="block-sep"><td colspan="6"></td></tr>
               ${rowsHtml}
-            `;
-          })
-          .join('')}
-      </tbody>
+            </tbody>
+          `;
+        })
+        .join('')}
     </table>`;
   } else {
     tableHtml = `
@@ -1680,7 +1784,8 @@ export function generatePrintableLoadReportHtml(
     .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 12px; }
     .header h1 { margin: 0; font-size: 17px; text-transform: uppercase; letter-spacing: 0.4px; }
     .header p { margin: 3px 0 0; font-size: 11px; color: #475569; }
-    table { width: 100%; border-collapse: collapse; font-size: 11px; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; page-break-inside: auto; }
+    thead { display: table-header-group; }
     th, td { border: 1px solid #1e293b; padding: 5px 8px; text-align: left; vertical-align: middle; }
     th { background: #e2e8f0; font-weight: 800; text-transform: uppercase; font-size: 10.5px; color: #0f172a; }
     .merged-left { background: #cbd5e1 !important; text-align: center; vertical-align: middle; border: 1.5px solid #0f172a; }
@@ -1692,7 +1797,31 @@ export function generatePrintableLoadReportHtml(
     .block-sep td { background: #94a3b8 !important; height: 6px; padding: 0 !important; border: none !important; }
     .badge { display: inline-block; padding: 2px 6px; background: #e0f2fe; color: #0369a1; border-radius: 4px; font-weight: 700; font-size: 10px; }
     .chip { display: inline-block; margin: 1px 3px 1px 0; padding: 2px 5px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 3px; font-size: 10px; }
-    @media print { .toolbar { display: none !important; } body { padding: 0; } }
+    
+    /* Strict page break rule: Never cut an individual teacher block or class block across 2 pages */
+    .teacher-block, .class-block {
+      page-break-inside: avoid !important;
+      break-inside: avoid !important;
+      break-inside: avoid-page !important;
+    }
+    tr {
+      page-break-inside: avoid !important;
+      break-inside: avoid !important;
+    }
+    
+    @media print {
+      .toolbar { display: none !important; }
+      body { padding: 0; background: #fff !important; }
+      .teacher-block, .class-block {
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        break-inside: avoid-page !important;
+      }
+      tr {
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+      }
+    }
   </style>
 </head>
 <body>

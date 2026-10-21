@@ -113,6 +113,12 @@ import {
   ParsedCsvRow,
 } from './utils/exportDatabase';
 import {
+  downloadStyledExcelFile,
+  generateStyledExcelForEnsembleMatrix,
+  generateStyledExcelForLoadClasses,
+  generateStyledExcelForLoadTeachers,
+} from './utils/exportExcelStyled';
+import {
   ConstraintRule,
   DEFAULT_CONSTRAINTS,
   DEFAULT_ROOMS,
@@ -384,7 +390,13 @@ export default function App() {
     setHistoryPast((prev) => prev.slice(0, -1));
     setHistoryFuture((prev) => [classes, ...prev]);
     setClasses(previous);
-    appendAuditLog('Annulation (Undo)', 'Retour à l’état précédent de la grille.');
+    appendAuditLog('Précédent (Retour arrière / Undo)', 'Retour à l’état précédent de la grille.');
+    triggerRealtimeNotification(
+      '↩ Action annulée (Précédent)',
+      'Retour à la version précédente de l’emploi du temps.',
+      'schedule_updated',
+      'all'
+    );
   };
 
   const handleRedo = () => {
@@ -393,8 +405,34 @@ export default function App() {
     setHistoryFuture((prev) => prev.slice(1));
     setHistoryPast((prev) => [...prev, classes]);
     setClasses(next);
-    appendAuditLog('Rétablissement (Redo)', 'Restauration de la modification.');
+    appendAuditLog('Suivant (Rétablissement / Redo)', 'Restauration de la modification.');
+    triggerRealtimeNotification(
+      '↪ Modification rétablie (Suivant)',
+      'Rétablissement de la version modifiée.',
+      'schedule_updated',
+      'all'
+    );
   };
+
+  // Global Keyboard Shortcuts (Ctrl+Z for Précédent/Undo, Ctrl+Y or Shift+Ctrl+Z for Redo)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          handleRedo();
+        } else {
+          e.preventDefault();
+          handleUndo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [historyPast, historyFuture, classes]);
 
   // 1. Firebase Auth Listener
   useEffect(() => {
@@ -1209,6 +1247,9 @@ export default function App() {
     if (!cleanName) return;
 
     const sectionMap: Record<Exclude<SchoolCategory, 'ALL'>, string> = {
+      KG_Maternelle: 'Maternelle (KG)',
+      Primaire: 'Primaire',
+      Secondaire: 'Secondaire',
       French_Section: 'Section Française',
       Boys_Section: 'Boys Section',
       Girls_Section: 'Girls Section',
@@ -1933,6 +1974,79 @@ export default function App() {
     appendAuditLog(
       `Impression Vue Ensemble (${CATEGORY_SHORT_LABELS[selectedCategory]})`,
       `Matrice complète multi-classes exportée en HTML/PDF Paysage.`
+    );
+  };
+
+  // Styled Excel Exporters (with same visual design, colors, headers, borders, merged cells)
+  const handleExportExcelLoadTeachers = () => {
+    const teacherRows = computeTeachersLoadReport(
+      teachers,
+      classes,
+      selectedCategory
+    );
+    const html = generateStyledExcelForLoadTeachers(
+      teacherRows,
+      selectedCategory,
+      schoolYear
+    );
+    downloadStyledExcelFile(
+      html,
+      `AlKawthar_Load_Teachers_${selectedCategory}_${schoolYear}.xls`
+    );
+    appendAuditLog(
+      'Export Excel Load Teachers',
+      `Fichier Excel généré avec design original et couleurs (${CATEGORY_SHORT_LABELS[selectedCategory]}).`
+    );
+    triggerRealtimeNotification(
+      'Export Excel Load Teachers téléchargé',
+      `Fichier Excel (.xls) avec design complet et codes couleur généré avec succès.`,
+      'schedule_updated',
+      'all'
+    );
+  };
+
+  const handleExportExcelLoadClasses = () => {
+    const classBlocks = computeClassesLoadReport(classes, selectedCategory);
+    const html = generateStyledExcelForLoadClasses(
+      classBlocks,
+      selectedCategory,
+      schoolYear
+    );
+    downloadStyledExcelFile(
+      html,
+      `AlKawthar_Load_Classes_${selectedCategory}_${schoolYear}.xls`
+    );
+    appendAuditLog(
+      'Export Excel Load Classes',
+      `Fichier Excel généré avec design original et couleurs (${CATEGORY_SHORT_LABELS[selectedCategory]}).`
+    );
+    triggerRealtimeNotification(
+      'Export Excel Load Classes téléchargé',
+      `Fichier Excel (.xls) avec design complet et somme des séances généré avec succès.`,
+      'schedule_updated',
+      'all'
+    );
+  };
+
+  const handleExportExcelEnsemble = () => {
+    const html = generateStyledExcelForEnsembleMatrix(
+      classes,
+      selectedCategory,
+      schoolYear
+    );
+    downloadStyledExcelFile(
+      html,
+      `AlKawthar_Vue_Ensemble_${selectedCategory}_${schoolYear}.xls`
+    );
+    appendAuditLog(
+      'Export Excel Vue Ensemble',
+      `Matrice multi-classes complète exportée vers Excel avec couleurs (${CATEGORY_SHORT_LABELS[selectedCategory]}).`
+    );
+    triggerRealtimeNotification(
+      'Export Excel Vue Ensemble téléchargé',
+      `Grille globale de toutes les classes exportée vers Microsoft Excel avec couleurs.`,
+      'schedule_updated',
+      'all'
     );
   };
 
@@ -2980,33 +3094,27 @@ export default function App() {
             </button>
           </div>
 
-          {/* Right: Undo/Redo, Role Selector, Language FR/AR/EN, Dark Mode, Notifications, Auth */}
+          {/* Right: Prominent Précédent (Undo) / Redo, Role Selector, Language FR/AR/EN, Dark Mode, Notifications, Auth */}
           <div className="flex flex-wrap items-center gap-2">
-            {/* Undo / Redo */}
+            {/* Prominent Précédent / Retour en arrière button */}
             <div className="flex items-center gap-1">
               <button
                 onClick={handleUndo}
                 disabled={historyPast.length === 0}
-                title="Annuler la dernière modification (Undo)"
-                className={`p-1.5 rounded border disabled:opacity-40 ${
-                  darkMode
-                    ? 'border-slate-700 hover:bg-slate-800'
-                    : 'border-slate-200 hover:bg-slate-100'
-                }`}
+                title="Précédent : Retourner en arrière / Annuler la dernière action (Raccourci : Ctrl+Z)"
+                className="px-3 py-1.5 rounded-lg text-xs font-black bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:hover:bg-rose-600 text-white flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
               >
-                <RotateCcw className="w-3.5 h-3.5" />
+                <RotateCcw className="w-3.5 h-3.5 text-rose-100" />
+                <span>↩ Précédent {historyPast.length > 0 ? `(${historyPast.length})` : ''}</span>
               </button>
               <button
                 onClick={handleRedo}
                 disabled={historyFuture.length === 0}
-                title="Rétablir la modification (Redo)"
-                className={`p-1.5 rounded border disabled:opacity-40 ${
-                  darkMode
-                    ? 'border-slate-700 hover:bg-slate-800'
-                    : 'border-slate-200 hover:bg-slate-100'
-                }`}
+                title="Rétablir la modification (Redo - Raccourci : Ctrl+Y)"
+                className="p-1.5 rounded-lg border text-xs font-semibold disabled:opacity-40 flex items-center gap-1 cursor-pointer bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800"
               >
                 <RotateCw className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Rétablir</span>
               </button>
             </div>
 
@@ -3177,6 +3285,14 @@ export default function App() {
             handlePrintLoadReport(mode);
           }
         }}
+        canUndo={historyPast.length > 0}
+        onUndo={handleUndo}
+        undoCount={historyPast.length}
+        onExportExcel={(mode) => {
+          if (mode === 'teachers_load') handleExportExcelLoadTeachers();
+          else if (mode === 'classes_load') handleExportExcelLoadClasses();
+          else handleExportExcelEnsemble();
+        }}
         darkMode={darkMode}
       />
 
@@ -3244,31 +3360,50 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Quick Print Load Reports */}
+              {/* Quick Print & Excel Export Load Reports */}
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  onClick={handleExportExcelLoadTeachers}
+                  className="px-2.5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-md flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  title="Exporter le tableau Load Teachers avec design et couleurs vers Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Excel Teachers</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportExcelLoadClasses}
+                  className="px-2.5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-md flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  title="Exporter le tableau Load Classes avec design et couleurs vers Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Excel Classes</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportExcelEnsemble}
+                  className="px-2.5 py-1.5 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-md flex items-center gap-1.5 shadow-xs cursor-pointer"
+                  title="Exporter la Vue Ensemble complète vers Excel"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Excel Ensemble</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => handlePrintLoadReport('teachers_load')}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   <Printer className="w-3.5 h-3.5 text-sky-700" />
-                  <span>Imprimer Load Teachers</span>
+                  <span>Imprimer Teachers</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handlePrintLoadReport('classes_load')}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   <Printer className="w-3.5 h-3.5 text-indigo-700" />
-                  <span>Imprimer Load Classes</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handlePrintLoadReport('subjects_load')}
-                  className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                >
-                  <Printer className="w-3.5 h-3.5 text-emerald-700" />
-                  <span>Imprimer Load Subjects</span>
+                  <span>Imprimer Classes</span>
                 </button>
               </div>
             </div>
@@ -3290,6 +3425,7 @@ export default function App() {
                   setEditorSubMode('loads');
                 }}
                 onPrintEnsemble={handlePrintEnsembleMatrix}
+                onExportExcelEnsemble={handleExportExcelEnsemble}
                 darkMode={darkMode}
               />
             )}
@@ -3372,6 +3508,9 @@ export default function App() {
                 onPrintLoadSubjects={() =>
                   handlePrintLoadReport('subjects_load')
                 }
+                onExportExcelLoadTeachers={handleExportExcelLoadTeachers}
+                onExportExcelLoadClasses={handleExportExcelLoadClasses}
+                onExportExcelLoadSubjects={handleExportExcelLoadTeachers}
               />
             )}
 

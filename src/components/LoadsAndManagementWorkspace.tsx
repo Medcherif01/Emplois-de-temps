@@ -7,6 +7,7 @@ import {
   Clock,
   Copy,
   Edit3,
+  FileSpreadsheet,
   Layers,
   Plus,
   Printer,
@@ -132,14 +133,20 @@ interface LoadsAndManagementWorkspaceProps {
   onPrintLoadTeachers: () => void;
   onPrintLoadClasses: () => void;
   onPrintLoadSubjects: () => void;
+  onExportExcelLoadTeachers?: () => void;
+  onExportExcelLoadClasses?: () => void;
+  onExportExcelLoadSubjects?: () => void;
 }
 
 const CATEGORIES: SchoolCategory[] = [
   'ALL',
-  'French_Section',
-  'KG_Primary',
-  'Girls_Section',
+  'KG_Maternelle',
+  'Primaire',
+  'Secondaire',
   'Boys_Section',
+  'Girls_Section',
+  'French_Section',
+  'American_Section',
 ];
 
 const DAYS: DayOfWeek[] = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi'];
@@ -179,6 +186,9 @@ export const LoadsAndManagementWorkspace: React.FC<
   onPrintLoadTeachers,
   onPrintLoadClasses,
   onPrintLoadSubjects,
+  onExportExcelLoadTeachers,
+  onExportExcelLoadClasses,
+  onExportExcelLoadSubjects,
 }) => {
   const [subTab, setSubTab] = useState<
     | 'load_teachers'
@@ -430,6 +440,26 @@ export const LoadsAndManagementWorkspace: React.FC<
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {onExportExcelLoadTeachers && (
+            <button
+              onClick={onExportExcelLoadTeachers}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-xs cursor-pointer"
+              title="Exporter le tableau Load Teachers vers Microsoft Excel avec le même design et les couleurs"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-100" />
+              Excel Load Teachers
+            </button>
+          )}
+          {onExportExcelLoadClasses && (
+            <button
+              onClick={onExportExcelLoadClasses}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
+              title="Exporter le tableau Load Classes vers Microsoft Excel avec le même design et les couleurs"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-100" />
+              Excel Load Classes
+            </button>
+          )}
           <button
             onClick={onPrintLoadTeachers}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-700 text-white hover:bg-sky-800 shadow-xs cursor-pointer"
@@ -439,14 +469,14 @@ export const LoadsAndManagementWorkspace: React.FC<
           </button>
           <button
             onClick={onPrintLoadClasses}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-700 text-white hover:bg-indigo-800 shadow-xs cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-900 text-white hover:bg-indigo-950 shadow-xs cursor-pointer"
           >
             <Printer className="w-3.5 h-3.5" />
             Imprimer Load Classes
           </button>
           <button
             onClick={onPrintLoadSubjects}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-700 text-white hover:bg-emerald-800 shadow-xs cursor-pointer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 text-white hover:bg-slate-900 shadow-xs cursor-pointer"
           >
             <Printer className="w-3.5 h-3.5" />
             Imprimer Load Subjects

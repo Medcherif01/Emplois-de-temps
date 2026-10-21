@@ -517,11 +517,23 @@ export function generateStandaloneLandscapeHtml(
     }
     @media print {
       .toolbar { display: none !important; }
-      body { padding: 0; }
+      body { padding: 0; background: #fff !important; }
+      .sheet {
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+        break-inside: avoid-page !important;
+      }
+      tr {
+        page-break-inside: avoid !important;
+        break-inside: avoid !important;
+      }
     }
     .sheet {
       width: 100%;
       margin-bottom: 24px;
+      page-break-inside: avoid !important;
+      break-inside: avoid !important;
+      break-inside: avoid-page !important;
     }
     .page-break {
       page-break-after: always;
