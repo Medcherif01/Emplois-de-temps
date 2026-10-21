@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { Lock, Unlock } from 'lucide-react';
 import {
   BELL_SCHEDULES,
   DAYS_OF_WEEK,
@@ -19,7 +20,11 @@ interface LandscapeTimetableSheetProps {
   editable?: boolean;
   conflictSlotKeys?: Set<string>;
   unavailableSlotKeys?: Set<string>;
+  lockedSlotKeys?: Set<string>;
+  modifiedSlotKeys?: Set<string>;
   onSlotClick?: (day: DayOfWeek, period: number, currentSlot?: LessonSlot) => void;
+  onSlotSwap?: (fromKey: string, toKey: string) => void;
+  onToggleLockSlot?: (slotKey: string) => void;
 }
 
 export const AlKawtharCrestSvg: React.FC<{ className?: string }> = ({
@@ -82,9 +87,15 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
   editable = false,
   conflictSlotKeys,
   unavailableSlotKeys,
+  lockedSlotKeys,
+  modifiedSlotKeys,
   onSlotClick,
+  onSlotSwap,
+  onToggleLockSlot,
 }) => {
   const bellRows = BELL_SCHEDULES[section] || BELL_SCHEDULES.Primary;
+  const [draggedKey, setDraggedKey] = useState<string | null>(null);
+  const [dragOverKey, setDragOverKey] = useState<string | null>(null);
 
   return (
     <div className="bg-white text-slate-950 border border-slate-300 p-5 print-only-landscape select-none">
@@ -147,7 +158,6 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
               }
 
               const periodNum = row.periodNumber!;
-              // Alternate light cyan/blue tint on period column like the PDF
               const periodBg =
                 periodNum % 2 === 1 ? 'bg-[#bceeff]' : 'bg-[#8ec5fe]';
 
@@ -169,26 +179,89 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                     const cell = slots[slotKey];
                     const hasConflict = conflictSlotKeys?.has(slotKey);
                     const isUnavailable = unavailableSlotKeys?.has(slotKey);
+                    const isLocked = lockedSlotKeys?.has(slotKey);
+                    const isModified = modifiedSlotKeys?.has(slotKey);
                     const hasSplit = Boolean(cell?.subSubject && cell?.subTeacher);
+                    const isDragTarget = dragOverKey === slotKey;
 
                     return (
                       <td
                         key={slotKey}
+                        draggable={editable && Boolean(cell) && !isLocked}
+                        onDragStart={(e) => {
+                          if (!editable || isLocked) return;
+                          setDraggedKey(slotKey);
+                          e.dataTransfer.setData('text/plain', slotKey);
+                        }}
+                        onDragOver={(e) => {
+                          if (!editable || !onSlotSwap) return;
+                          e.preventDefault();
+                          if (dragOverKey !== slotKey) setDragOverKey(slotKey);
+                        }}
+                        onDragLeave={() => {
+                          if (dragOverKey === slotKey) setDragOverKey(null);
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setDragOverKey(null);
+                          const fromKey =
+                            draggedKey || e.dataTransfer.getData('text/plain');
+                          setDraggedKey(null);
+                          if (
+                            editable &&
+                            onSlotSwap &&
+                            fromKey &&
+                            fromKey !== slotKey
+                          ) {
+                            onSlotSwap(fromKey, slotKey);
+                          }
+                        }}
                         onClick={() =>
                           editable && onSlotClick
                             ? onSlotClick(day, periodNum, cell)
                             : undefined
                         }
-                        className={`border border-slate-800 p-0 align-stretch relative transition-colors ${
+                        className={`border border-slate-800 p-0 align-stretch relative group transition-colors ${
                           editable ? 'cursor-pointer hover:bg-sky-50/70' : ''
                         } ${
-                          hasConflict
+                          isDragTarget
+                            ? 'bg-sky-100 ring-2 ring-inset ring-sky-600'
+                            : hasConflict
                             ? 'bg-red-50 ring-2 ring-inset ring-red-600'
+                            : isModified
+                            ? 'bg-emerald-50/70 ring-1 ring-inset ring-emerald-500'
                             : isUnavailable
                             ? 'bg-amber-50/70'
                             : 'bg-white'
                         }`}
                       >
+                        {/* Lock/Unlock Control in Top-Right Corner */}
+                        {editable && onToggleLockSlot && cell && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onToggleLockSlot(slotKey);
+                            }}
+                            title={
+                              isLocked
+                                ? 'Séance verrouillée (cliquer pour déverrouiller)'
+                                : 'Verrouiller cette séance'
+                            }
+                            className={`absolute top-1 right-1 z-10 p-0.5 rounded no-print transition-opacity ${
+                              isLocked
+                                ? 'opacity-100 text-amber-700 bg-amber-100'
+                                : 'opacity-0 group-hover:opacity-100 text-slate-400 hover:text-slate-800 bg-white/80'
+                            }`}
+                          >
+                            {isLocked ? (
+                              <Lock className="w-3 h-3" />
+                            ) : (
+                              <Unlock className="w-3 h-3" />
+                            )}
+                          </button>
+                        )}
+
                         {cell ? (
                           hasSplit ? (
                             <div className="grid grid-cols-2 h-[62px] divide-x divide-slate-800">
@@ -218,7 +291,7 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                                 <span className="text-[11px] font-medium text-slate-800 truncate">
                                   {cell.teacher}
                                 </span>
-                                {isTeacherView && cell.room && (
+                                {(isTeacherView || cell.room) && cell.room && (
                                   <span className="text-[10px] text-slate-500 truncate">
                                     {cell.room}
                                   </span>
@@ -233,7 +306,7 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                                 Indisponible
                               </span>
                             ) : editable ? (
-                              <span className="text-[11px] text-slate-300 opacity-0 hover:opacity-100 transition-opacity no-print">
+                              <span className="text-[11px] text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity no-print">
                                 + Ajouter
                               </span>
                             ) : null}

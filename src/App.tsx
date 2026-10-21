@@ -10,29 +10,43 @@ import {
   doc,
   onSnapshot,
   serverTimestamp,
-   setDoc,
+  setDoc,
   writeBatch,
 } from 'firebase/firestore';
 import {
   AlertTriangle,
+  BarChart3,
   Bell,
-  BookOpen,
+  Building2,
   Calendar,
+  Check,
   CheckCircle2,
-  Clock,
+  Copy,
   Database,
   Download,
-  Edit3,
+  FileSpreadsheet,
   FileText,
-  Filter,
+  Globe,
+  History,
+  Layers,
+  Lock,
   LogIn,
   LogOut,
+  MessageSquare,
+  Moon,
   Printer,
   RefreshCw,
+  RotateCcw,
+  RotateCw,
   Search,
+  Send,
+  ShieldCheck,
   Sliders,
   Sparkles,
+  Sun,
+  Upload,
   UserCheck,
+  UserMinus,
   Users,
   X,
 } from 'lucide-react';
@@ -67,45 +81,212 @@ import {
   LandscapeTimetableSheet,
 } from './components/LandscapeTimetableSheet';
 import {
+  CsvValidationIssue,
+  generateExcelCsvExport,
+  generateICalendarExport,
   generateMongoAtlasExport,
   generateMySqlDump,
+  parseAndValidateImportedCsv,
+  ParsedCsvRow,
 } from './utils/exportDatabase';
+import {
+  ConstraintRule,
+  DEFAULT_CONSTRAINTS,
+  DEFAULT_ROOMS,
+  DEFAULT_SUBJECT_CONFIGS,
+  evaluateTimetableQuality,
+  findSubstituteCandidates,
+  GeneratedProposal,
+  generateRankedProposals,
+  ProposedAiSwap,
+  RoomResource,
+  SubjectConfig,
+  verifySwapsWithConstraintEngine,
+} from './engine/cspEngine';
 
 type ActiveTab =
-  | 'classes'
-  | 'teachers_panel'
-  | 'availability'
-  | 'ai_optimizer'
-  | 'print_export';
+  | 'editor'
+  | 'teachers'
+  | 'ai_csp'
+  | 'resources'
+  | 'reports_export';
+
+type GridViewMode = 'class' | 'teacher' | 'room' | 'subject';
+type UserRole = 'admin' | 'section_head' | 'coordinator' | 'teacher';
+type AppLang = 'fr' | 'ar' | 'en';
+type ScheduleScenario = 'standard' | 'ramadan' | 'summer' | 'exams';
+
+interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  actor: string;
+  role: string;
+  action: string;
+  details: string;
+}
+
+const I18N: Record<
+  AppLang,
+  {
+    navEditor: string;
+    navTeachers: string;
+    navAiCsp: string;
+    navResources: string;
+    navReports: string;
+    printPdfBtn: string;
+  }
+> = {
+  fr: {
+    navEditor: 'Éditeur Visuel',
+    navTeachers: 'Enseignants & Remplacements',
+    navAiCsp: 'Moteur CSP & IA',
+    navResources: 'Salles & Matières',
+    navReports: 'Rapports, Import & PDF',
+    printPdfBtn: 'Imprimer PDF Paysage',
+  },
+  ar: {
+    navEditor: 'المحرر المرئي للجداول',
+    navTeachers: 'المعلمون والبدلاء',
+    navAiCsp: 'محرك القيود والذكاء الاصطناعي',
+    navResources: 'القاعات والمواد',
+    navReports: 'التقارير والطباعة PDF',
+    printPdfBtn: 'طباعة PDF أفقي',
+  },
+  en: {
+    navEditor: 'Visual Editor',
+    navTeachers: 'Teachers & Substitutes',
+    navAiCsp: 'CSP Engine & AI',
+    navResources: 'Rooms & Subjects',
+    navReports: 'Reports, Import & PDF',
+    printPdfBtn: 'Print Landscape PDF',
+  },
+};
 
 export default function App() {
-  // Auth & Role State
+  // UI Preferences (Language, RTL, Dark Mode, Role, Campus, Scenario, Publication Status)
+  const [lang, setLang] = useState<AppLang>('fr');
+  const [darkMode, setDarkMode] = useState(false);
+  const [roleMode, setRoleMode] = useState<UserRole>('admin');
+  const [activeTab, setActiveTab] = useState<ActiveTab>('editor');
+  const [selectedCampus, setSelectedCampus] = useState(
+    'Al-Kawthar — Campus Principal Jeddah'
+  );
+  const [schoolYear, setSchoolYear] = useState('2026-2027');
+  const [scenario, setScenario] = useState<ScheduleScenario>('standard');
+  const [publicationStatus, setPublicationStatus] = useState<
+    'draft' | 'published'
+  >('published');
+
+  // Auth & Cloud State
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [roleMode, setRoleMode] = useState<'admin' | 'teacher'>('admin');
-  const [activeTab, setActiveTab] = useState<ActiveTab>('classes');
-
-  // Core Timetable & Teacher State (Initialized with Al-Kawthar 35 classes & 68 teachers)
-  const [classes, setClasses] = useState<SchoolClass[]>(DEFAULT_CLASSES);
-  const [teachers, setTeachers] = useState<TeacherProfile[]>(DEFAULT_TEACHERS);
   const [isSyncedWithCloud, setIsSyncedWithCloud] = useState(false);
   const [isSyncingDefaults, setIsSyncingDefaults] = useState(false);
 
-  // Filters & Selection
-  const [selectedSection, setSelectedSection] = useState<SectionType | 'ALL'>('ALL');
-  const [selectedClassId, setSelectedClassId] = useState<string>(DEFAULT_CLASSES[0].id);
+  // Core Data State
+  const [classes, setClasses] = useState<SchoolClass[]>(DEFAULT_CLASSES);
+  const [teachers, setTeachers] = useState<TeacherProfile[]>(DEFAULT_TEACHERS);
+  const [rooms, setRooms] = useState<RoomResource[]>(DEFAULT_ROOMS);
+  const [subjectConfigs, setSubjectConfigs] = useState<SubjectConfig[]>(
+    DEFAULT_SUBJECT_CONFIGS
+  );
+  const [constraints, setConstraints] =
+    useState<ConstraintRule[]>(DEFAULT_CONSTRAINTS);
+
+  // Undo / Redo History Stack & Best Snapshot
+  const [historyPast, setHistoryPast] = useState<SchoolClass[][]>([]);
+  const [historyFuture, setHistoryFuture] = useState<SchoolClass[][]>([]);
+  const [bestVersionSnapshot, setBestVersionSnapshot] =
+    useState<SchoolClass[]>(DEFAULT_CLASSES);
+
+  // Locked Slots & Modified Slots Tracking
+  const [lockedSlotsByClass, setLockedSlotsByClass] = useState<
+    Record<string, string[]>
+  >({});
+  const [modifiedSlotsByClass, setModifiedSlotsByClass] = useState<
+    Record<string, string[]>
+  >({});
+
+  // Visual Editor View Mode & Filters
+  const [gridViewMode, setGridViewMode] = useState<GridViewMode>('class');
+  const [selectedSection, setSelectedSection] = useState<SectionType | 'ALL'>(
+    'ALL'
+  );
+  const [selectedClassId, setSelectedClassId] = useState<string>(
+    DEFAULT_CLASSES[0].id
+  );
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>(
     DEFAULT_TEACHERS[0]?.id || ''
   );
+  const [selectedRoomId, setSelectedRoomId] = useState<string>(
+    DEFAULT_ROOMS[0].id
+  );
+  const [selectedSubjectFilter, setSelectedSubjectFilter] =
+    useState<string>('Maths');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Notifications & Real-Time WebSocket State
+  // Sub-tabs inside Teachers Module
+  const [teacherSubTab, setTeacherSubTab] = useState<
+    'directory' | 'availability' | 'substitutes'
+  >('directory');
+
+  // Substitute / Absence Finder State
+  const [absentTeacherId, setAbsentTeacherId] = useState<string>(
+    DEFAULT_TEACHERS[0]?.id || ''
+  );
+  const [absentDay, setAbsentDay] = useState<DayOfWeek>('Dimanche');
+  const [absentPeriod, setAbsentPeriod] = useState<number>(1);
+
+  // Conversational AI & Multi-Proposal State
+  const [chatInput, setChatInput] = useState(
+    'Déplace les cours de sciences ou biologie de l’après-midi vers le matin pour PEI2 sans violer les contraintes.'
+  );
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [pendingAiProposal, setPendingAiProposal] = useState<{
+    reply: string;
+    warning: string;
+    swaps: ProposedAiSwap[];
+    engineValid: boolean;
+    engineViolations: string[];
+    previewClasses: SchoolClass[];
+  } | null>(null);
+
+  const [generatedProposals, setGeneratedProposals] = useState<
+    GeneratedProposal[]
+  >([]);
+  const [isGeneratingProposals, setIsGeneratingProposals] = useState(false);
+
+  const [aiCustomPrompt, setAiCustomPrompt] = useState(
+    "Optimiser l'équilibre hebdomadaire des matières principales le matin (P1-P4), éliminer les heures creuses et respecter 100% des indisponibilités."
+  );
+  const [isAiRunning, setIsAiRunning] = useState(false);
+  const [aiResultSummary, setAiResultSummary] = useState<{
+    summary: string;
+    pedagogicalScore?: number;
+  } | null>(null);
+  const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(
+    null
+  );
+
+  // Import CSV Modal / State
+  const [csvImportText, setCsvImportText] = useState('');
+  const [csvValidationResult, setCsvValidationResult] = useState<{
+    rows: ParsedCsvRow[];
+    issues: CsvValidationIssue[];
+  } | null>(null);
+
+  // Print Scope
+  const [printScope, setPrintScope] = useState<
+    'current_class' | 'current_teacher'
+  >('current_class');
+
+  // Notifications, Audit Log & WebSocket
   const [notifications, setNotifications] = useState<NotificationEntry[]>([
     {
       id: 'welcome-notif',
-      title: 'Emplois du temps par défaut Al-Kawthar appliqués',
+      title: 'Système Al-Kawthar Initialisé (35 Classes · 68 Enseignants)',
       message:
-        'Les 35 classes (Pre-KG à DP2 Garçons) et 68 enseignants sont chargés avec leurs horaires officiels.',
+        'Toutes les grilles horaires par défaut, matières, salles et contraintes CP-SAT sont actives.',
       type: 'teacher_assigned',
       targetTeacher: 'all',
       visibility: 'school',
@@ -113,12 +294,22 @@ export default function App() {
       timestampMs: Date.now(),
     },
   ]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([
+    {
+      id: 'aud-1',
+      timestamp: new Date().toLocaleTimeString('fr-FR'),
+      actor: 'Système Initialisation',
+      role: 'Administrateur Principal',
+      action: 'Chargement des emplois du temps officiels Al-Kawthar',
+      details: '35 classes (Pre-KG à DP2 Garçons) et 68 enseignants affectés.',
+    },
+  ]);
   const [unreadCount, setUnreadCount] = useState(1);
   const [showNotifDrawer, setShowNotifDrawer] = useState(false);
   const [liveToast, setLiveToast] = useState<NotificationEntry | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Cell Editing Modal State
+  // Cell Editor Modal
   const [editingCell, setEditingCell] = useState<{
     classId: string;
     day: DayOfWeek;
@@ -127,23 +318,47 @@ export default function App() {
     teacher: string;
     subSubject: string;
     subTeacher: string;
+    room: string;
   } | null>(null);
 
-  // AI Optimization State
-  const [aiCustomPrompt, setAiCustomPrompt] = useState(
-    "Optimiser l'équilibre hebdomadaire des matières principales, éviter les doublons consécutifs et respecter strictement les indisponibilités des enseignants."
-  );
-  const [isAiRunning, setIsAiRunning] = useState(false);
-  const [aiResultSummary, setAiResultSummary] = useState<{
-    summary: string;
-    pedagogicalScore?: number;
-  } | null>(null);
-  const [resolvingConflictId, setResolvingConflictId] = useState<string | null>(null);
+  const appendAuditLog = (action: string, details: string) => {
+    setAuditLogs((prev) => [
+      {
+        id: `aud_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: new Date().toLocaleTimeString('fr-FR'),
+        actor: user?.displayName || user?.email || 'Direction Al-Kawthar',
+        role: roleMode,
+        action,
+        details,
+      },
+      ...prev.slice(0, 99),
+    ]);
+  };
 
-  // Print Mode Selection
-  const [printScope, setPrintScope] = useState<
-    'current_class' | 'current_teacher' | 'section_classes'
-  >('current_class');
+  // Push current state to Undo stack before mutating classes
+  const recordHistoryAndSetClasses = (nextClasses: SchoolClass[]) => {
+    setHistoryPast((prev) => [...prev.slice(-19), classes]);
+    setHistoryFuture([]);
+    setClasses(nextClasses);
+  };
+
+  const handleUndo = () => {
+    if (historyPast.length === 0) return;
+    const previous = historyPast[historyPast.length - 1];
+    setHistoryPast((prev) => prev.slice(0, -1));
+    setHistoryFuture((prev) => [classes, ...prev]);
+    setClasses(previous);
+    appendAuditLog('Annulation (Undo)', 'Retour à l’état précédent de la grille.');
+  };
+
+  const handleRedo = () => {
+    if (historyFuture.length === 0) return;
+    const next = historyFuture[0];
+    setHistoryFuture((prev) => prev.slice(1));
+    setHistoryPast((prev) => [...prev, classes]);
+    setClasses(next);
+    appendAuditLog('Rétablissement (Redo)', 'Restauration de la modification.');
+  };
 
   // 1. Firebase Auth Listener
   useEffect(() => {
@@ -154,7 +369,7 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // 2. Real-Time Firestore Listeners (when authenticated)
+  // 2. Real-Time Firestore Listeners
   useEffect(() => {
     if (!authReady || !user) return;
 
@@ -168,7 +383,6 @@ export default function App() {
             const data = docSnap.data() as Omit<SchoolClass, 'id'>;
             loaded.push({ ...data, id: docSnap.id });
           });
-          // Merge loaded classes with default order
           const byId = new Map(loaded.map((c) => [c.id, c]));
           const merged = DEFAULT_CLASSES.map((def) => byId.get(def.id) || def);
           setClasses(merged);
@@ -206,7 +420,7 @@ export default function App() {
     };
   }, [authReady, user]);
 
-  // 3. Real-Time WebSocket Connection for Instant Notifications & Multi-User Sync
+  // 3. Real-Time WebSocket Connection
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -224,9 +438,9 @@ export default function App() {
             if (msg.event === 'init' && msg.payload?.notifications) {
               setNotifications((prev) => {
                 const existingIds = new Set(prev.map((n) => n.id));
-                const incoming = (msg.payload.notifications as NotificationEntry[]).filter(
-                  (n) => !existingIds.has(n.id)
-                );
+                const incoming = (
+                  msg.payload.notifications as NotificationEntry[]
+                ).filter((n) => !existingIds.has(n.id));
                 return [...incoming, ...prev].slice(0, 40);
               });
             } else if (msg.event === 'notification:created' && msg.payload) {
@@ -238,7 +452,9 @@ export default function App() {
               setUnreadCount((c) => c + 1);
               setLiveToast(newNotif);
               setTimeout(() => {
-                setLiveToast((curr) => (curr?.id === newNotif.id ? null : curr));
+                setLiveToast((curr) =>
+                  curr?.id === newNotif.id ? null : curr
+                );
               }, 5000);
             } else if (msg.event === 'schedule:mutated' && msg.payload) {
               const { classId, updatedSlots } = msg.payload;
@@ -270,7 +486,6 @@ export default function App() {
     };
   }, []);
 
-  // Helper: Trigger Real-Time Notification (WebSocket + Firestore if logged in)
   const triggerRealtimeNotification = async (
     title: string,
     message: string,
@@ -288,7 +503,9 @@ export default function App() {
     }
 
     if (user) {
-      const notifId = `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const notifId = `notif_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 6)}`;
       try {
         await setDoc(doc(db, 'notifications', notifId), {
           title: title.slice(0, 150),
@@ -300,22 +517,41 @@ export default function App() {
           createdAt: serverTimestamp(),
         });
       } catch (err) {
-        handleFirestoreError(err, OperationType.CREATE, `notifications/${notifId}`);
+        handleFirestoreError(
+          err,
+          OperationType.CREATE,
+          `notifications/${notifId}`
+        );
       }
     }
   };
 
-  // Persist a single class update to Firestore + WS
-  const saveClassToStore = async (updatedClass: SchoolClass) => {
-    setClasses((prev) =>
-      prev.map((c) => (c.id === updatedClass.id ? updatedClass : c))
+  const saveClassToStore = async (
+    updatedClass: SchoolClass,
+    modifiedKeys: string[] = []
+  ) => {
+    const nextClasses = classes.map((c) =>
+      c.id === updatedClass.id ? updatedClass : c
     );
+    recordHistoryAndSetClasses(nextClasses);
+
+    if (modifiedKeys.length > 0) {
+      setModifiedSlotsByClass((prev) => ({
+        ...prev,
+        [updatedClass.id]: Array.from(
+          new Set([...(prev[updatedClass.id] || []), ...modifiedKeys])
+        ),
+      }));
+    }
 
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           event: 'schedule:mutated',
-          payload: { classId: updatedClass.id, updatedSlots: updatedClass.slots },
+          payload: {
+            classId: updatedClass.id,
+            updatedSlots: updatedClass.slots,
+          },
         })
       );
     }
@@ -333,12 +569,15 @@ export default function App() {
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `classes/${updatedClass.id}`);
+        handleFirestoreError(
+          err,
+          OperationType.WRITE,
+          `classes/${updatedClass.id}`
+        );
       }
     }
   };
 
-  // Persist a single teacher update to Firestore
   const saveTeacherToStore = async (updatedTeacher: TeacherProfile) => {
     setTeachers((prev) =>
       prev.map((t) => (t.id === updatedTeacher.id ? updatedTeacher : t))
@@ -350,7 +589,10 @@ export default function App() {
           name: updatedTeacher.name.slice(0, 120),
           subjects: updatedTeacher.subjects.slice(0, 10),
           section: updatedTeacher.section.slice(0, 80),
-          maxPeriodsPerWeek: Math.min(45, Math.max(1, updatedTeacher.maxPeriodsPerWeek)),
+          maxPeriodsPerWeek: Math.min(
+            45,
+            Math.max(1, updatedTeacher.maxPeriodsPerWeek)
+          ),
           unavailableSlots: updatedTeacher.unavailableSlots.slice(0, 40),
           defaultAssigned: updatedTeacher.defaultAssigned,
           visibility: 'school',
@@ -359,12 +601,15 @@ export default function App() {
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `teachers/${updatedTeacher.id}`);
+        handleFirestoreError(
+          err,
+          OperationType.WRITE,
+          `teachers/${updatedTeacher.id}`
+        );
       }
     }
   };
 
-  // Batch Apply Default Timetables to All Teachers & Classes
   const handleApplyAllDefaultTimetables = async () => {
     setIsSyncingDefaults(true);
     try {
@@ -408,6 +653,11 @@ export default function App() {
         setIsSyncedWithCloud(true);
       }
 
+      appendAuditLog(
+        'Affectation par défaut aux enseignants',
+        `Synchronisation globale des ${classes.length} classes et ${teachers.length} enseignants.`
+      );
+
       await triggerRealtimeNotification(
         'Emplois par défaut affectés aux enseignants',
         `Les grilles horaires officielles Al-Kawthar (${classes.length} classes) ont été appliquées et synchronisées pour les ${teachers.length} enseignants.`,
@@ -434,14 +684,83 @@ export default function App() {
     [teachers, selectedTeacherId]
   );
 
+  const selectedRoom = useMemo(
+    () => rooms.find((r) => r.id === selectedRoomId) || rooms[0],
+    [rooms, selectedRoomId]
+  );
+
   const selectedTeacherSchedule = useMemo(() => {
-    if (!selectedTeacher) return { slots: {}, totalPeriods: 0, classesTaught: [] };
+    if (!selectedTeacher)
+      return { slots: {}, totalPeriods: 0, classesTaught: [] };
     return buildTeacherTimetable(selectedTeacher.name, classes);
   }, [selectedTeacher, classes]);
+
+  // Build Room Timetable across all classes
+  const selectedRoomSchedule = useMemo(() => {
+    const slots: Record<string, LessonSlot> = {};
+    for (const cls of classes) {
+      for (const [key, slot] of Object.entries(cls.slots)) {
+        const sLower = slot.subject.toLowerCase();
+        const matchesRoom =
+          slot.room === selectedRoom.name ||
+          cls.room === selectedRoom.name ||
+          (selectedRoom.type === 'science_lab' &&
+            (sLower.includes('phys') ||
+              sLower.includes('chem') ||
+              sLower.includes('biol') ||
+              sLower.includes('scien'))) ||
+          (selectedRoom.type === 'computer_lab' &&
+            (sLower.includes('comput') ||
+              sLower.includes('html') ||
+              sLower.includes('ict') ||
+              sLower.includes('inform'))) ||
+          (selectedRoom.type === 'library' && sLower.includes('librar')) ||
+          (selectedRoom.type === 'sports' && sLower.includes('p.e')) ||
+          (selectedRoom.type === 'art_music' &&
+            (sLower.includes('art') || sLower.includes('music')));
+
+        if (matchesRoom && !slots[key]) {
+          slots[key] = {
+            subject: `${slot.subject} (${cls.name})`,
+            teacher: slot.teacher,
+            room: selectedRoom.name,
+          };
+        }
+      }
+    }
+    return slots;
+  }, [classes, selectedRoom]);
+
+  // Build Subject Timetable across classes
+  const selectedSubjectSchedule = useMemo(() => {
+    const slots: Record<string, LessonSlot> = {};
+    for (const cls of classes) {
+      for (const [key, slot] of Object.entries(cls.slots)) {
+        if (
+          slot.subject
+            .toLowerCase()
+            .includes(selectedSubjectFilter.toLowerCase()) &&
+          !slots[key]
+        ) {
+          slots[key] = {
+            subject: `${cls.name} — ${slot.subject}`,
+            teacher: slot.teacher,
+            room: cls.room,
+          };
+        }
+      }
+    }
+    return slots;
+  }, [classes, selectedSubjectFilter]);
 
   const conflicts = useMemo(
     () => detectScheduleConflicts(classes, teachers),
     [classes, teachers]
+  );
+
+  const qualityReport = useMemo(
+    () => evaluateTimetableQuality(classes, teachers, rooms),
+    [classes, teachers, rooms]
   );
 
   const selectedClassConflictKeys = useMemo(() => {
@@ -456,7 +775,8 @@ export default function App() {
 
   const filteredClasses = useMemo(() => {
     return classes.filter((c) => {
-      if (selectedSection !== 'ALL' && c.section !== selectedSection) return false;
+      if (selectedSection !== 'ALL' && c.section !== selectedSection)
+        return false;
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase();
       if (c.name.toLowerCase().includes(q)) return true;
@@ -480,7 +800,76 @@ export default function App() {
     });
   }, [teachers, searchQuery]);
 
-  // Handlers for Editing a Slot
+  // Drag & Drop Slot Swap Handler in Visual Editor
+  const handleDragDropSlotSwap = async (fromKey: string, toKey: string) => {
+    const locked = new Set(lockedSlotsByClass[selectedClass.id] || []);
+    if (locked.has(fromKey) || locked.has(toKey)) {
+      await triggerRealtimeNotification(
+        'Déplacement refusé (Séance verrouillée)',
+        `Le créneau ${fromKey} ou ${toKey} est verrouillé par la direction (HC_04).`,
+        'schedule_updated',
+        'all'
+      );
+      return;
+    }
+
+    const nextSlots = { ...selectedClass.slots };
+    const slotA = nextSlots[fromKey];
+    const slotB = nextSlots[toKey];
+
+    if (!slotA && !slotB) return;
+
+    if (slotA && slotB) {
+      nextSlots[fromKey] = slotB;
+      nextSlots[toKey] = slotA;
+    } else if (slotA && !slotB) {
+      nextSlots[toKey] = slotA;
+      delete nextSlots[fromKey];
+    } else if (!slotA && slotB) {
+      nextSlots[fromKey] = slotB;
+      delete nextSlots[toKey];
+    }
+
+    await saveClassToStore(
+      { ...selectedClass, slots: nextSlots },
+      [fromKey, toKey]
+    );
+    appendAuditLog(
+      `Glisser-déposer (${selectedClass.name})`,
+      `Permutation ${fromKey} ↔ ${toKey}`
+    );
+    await triggerRealtimeNotification(
+      `Permutation : ${selectedClass.name}`,
+      `Séances permutées entre ${fromKey.replace('_', ' P')} et ${toKey.replace(
+        '_',
+        ' P'
+      )} en ${selectedClass.name}.`,
+      'schedule_updated',
+      slotA?.teacher || 'all'
+    );
+  };
+
+  // Toggle Lock on a Slot
+  const handleToggleLockSlot = (slotKey: string) => {
+    setLockedSlotsByClass((prev) => {
+      const curr = new Set(prev[selectedClass.id] || []);
+      if (curr.has(slotKey)) {
+        curr.delete(slotKey);
+      } else {
+        curr.add(slotKey);
+      }
+      return {
+        ...prev,
+        [selectedClass.id]: Array.from(curr),
+      };
+    });
+    appendAuditLog(
+      `Verrouillage séance (${selectedClass.name})`,
+      `Créneau ${slotKey} basculé.`
+    );
+  };
+
+  // Open Slot Editor Modal
   const handleOpenSlotEditor = (
     day: DayOfWeek,
     period: number,
@@ -494,6 +883,7 @@ export default function App() {
       teacher: currentSlot?.teacher || '',
       subSubject: currentSlot?.subSubject || '',
       subTeacher: currentSlot?.subTeacher || '',
+      room: currentSlot?.room || selectedClass.room,
     });
   };
 
@@ -509,6 +899,7 @@ export default function App() {
       const updatedSlot: LessonSlot = {
         subject: editingCell.subject.trim(),
         teacher: editingCell.teacher.trim(),
+        room: editingCell.room.trim() || selectedClass.room,
       };
       if (editingCell.subSubject.trim() && editingCell.subTeacher.trim()) {
         updatedSlot.subSubject = editingCell.subSubject.trim();
@@ -523,7 +914,11 @@ export default function App() {
     };
 
     setEditingCell(null);
-    await saveClassToStore(updatedClass);
+    await saveClassToStore(updatedClass, [key]);
+    appendAuditLog(
+      `Modification manuelle (${selectedClass.name})`,
+      `${key} : ${editingCell.subject} (${editingCell.teacher})`
+    );
     await triggerRealtimeNotification(
       `Modification : ${selectedClass.name} (${editingCell.day} P${editingCell.period})`,
       editingCell.subject.trim()
@@ -535,7 +930,10 @@ export default function App() {
   };
 
   // Toggle Teacher Availability
-  const handleToggleTeacherUnavailable = async (day: DayOfWeek, period: number) => {
+  const handleToggleTeacherUnavailable = async (
+    day: DayOfWeek,
+    period: number
+  ) => {
     if (!selectedTeacher) return;
     const key = `${day}_${period}`;
     const exists = selectedTeacher.unavailableSlots.includes(key);
@@ -549,6 +947,10 @@ export default function App() {
     };
 
     await saveTeacherToStore(updated);
+    appendAuditLog(
+      `Disponibilité enseignant (${selectedTeacher.name})`,
+      `${key} -> ${exists ? 'Disponible' : 'Indisponible'}`
+    );
     await triggerRealtimeNotification(
       `Disponibilité mise à jour : ${selectedTeacher.name}`,
       exists
@@ -557,6 +959,151 @@ export default function App() {
       'availability_changed',
       selectedTeacher.name
     );
+  };
+
+  // Generate 3 Ranked Proposals using CSP Solver
+  const handleGenerateMultiProposals = (scope: 'all' | 'current_class') => {
+    setIsGeneratingProposals(true);
+    setTimeout(() => {
+      const proposals = generateRankedProposals(
+        classes,
+        teachers,
+        lockedSlotsByClass,
+        scope === 'current_class' ? selectedClass.id : undefined
+      );
+      setGeneratedProposals(proposals);
+      setIsGeneratingProposals(false);
+      appendAuditLog(
+        'Génération Multi-Propositions CP-SAT',
+        `3 solutions classées générées (${
+          scope === 'all' ? 'Toutes les classes' : selectedClass.name
+        }).`
+      );
+    }, 250);
+  };
+
+  const handleApplyProposal = async (proposal: GeneratedProposal) => {
+    setBestVersionSnapshot(classes);
+    recordHistoryAndSetClasses(proposal.classes);
+    appendAuditLog(
+      `Application ${proposal.name}`,
+      `Score qualité ${proposal.quality.globalScore}/100 (${proposal.swapsPerformed} permutations).`
+    );
+    await triggerRealtimeNotification(
+      `${proposal.name} appliquée`,
+      `Nouveau score de qualité globale : ${proposal.quality.globalScore}/100 (${proposal.swapsPerformed} optimisations validées).`,
+      'ai_generated',
+      'all'
+    );
+  };
+
+  // Run Conversational AI Assistant + Constraint Verification
+  const handleAskConversationalAi = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+    setIsChatLoading(true);
+    setPendingAiProposal(null);
+
+    try {
+      const lockedSlots = lockedSlotsByClass[selectedClass.id] || [];
+      const classTeachers = new Set<string>();
+      Object.values(selectedClass.slots).forEach((s) =>
+        classTeachers.add(s.teacher.toLowerCase())
+      );
+      const relevantConstraints = teachers
+        .filter(
+          (t) =>
+            classTeachers.has(t.name.toLowerCase()) &&
+            t.unavailableSlots.length > 0
+        )
+        .map((t) => ({
+          teacher: t.name,
+          unavailableSlots: t.unavailableSlots,
+        }));
+
+      const response = await fetch('/api/gemini/conversational-assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userInstruction: chatInput,
+          targetClass: selectedClass,
+          lockedSlots,
+          teacherConstraints: relevantConstraints,
+          qualitySummary: qualityReport,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Erreur de l'assistant IA.");
+      }
+
+      const rawSwaps: ProposedAiSwap[] = (data.proposedSwaps || []).map(
+        (s: any) => {
+          const cls =
+            classes.find(
+              (c) =>
+                c.name.toLowerCase() === String(s.className || '').toLowerCase()
+            ) || selectedClass;
+          return {
+            classId: cls.id,
+            className: cls.name,
+            fromKey: s.fromKey,
+            toKey: s.toKey,
+            fromSlot: cls.slots[s.fromKey],
+            toSlot: cls.slots[s.toKey],
+            reason: s.reason,
+          };
+        }
+      );
+
+      // Verify proposed swaps with the deterministic Constraint Engine before allowing validation
+      const verification = verifySwapsWithConstraintEngine(
+        classes,
+        teachers,
+        lockedSlotsByClass,
+        rawSwaps
+      );
+
+      setPendingAiProposal({
+        reply: data.assistantReply || 'Analyse terminée.',
+        warning: data.incompatibleConstraintsWarning || '',
+        swaps: rawSwaps,
+        engineValid: verification.valid,
+        engineViolations: verification.violations,
+        previewClasses: verification.previewClasses,
+      });
+    } catch (err: unknown) {
+      setPendingAiProposal({
+        reply:
+          err instanceof Error
+            ? err.message
+            : "Erreur lors de l'analyse conversationnelle.",
+        warning: '',
+        swaps: [],
+        engineValid: false,
+        engineViolations: [],
+        previewClasses: classes,
+      });
+    } finally {
+      setIsChatLoading(false);
+    }
+  };
+
+  const handleConfirmPendingAiProposal = async () => {
+    if (!pendingAiProposal || pendingAiProposal.swaps.length === 0) return;
+    recordHistoryAndSetClasses(pendingAiProposal.previewClasses);
+    appendAuditLog(
+      'Assistant IA — Modifications validées',
+      `${pendingAiProposal.swaps.length} permutation(s) vérifiées par le moteur de contraintes.`
+    );
+    await triggerRealtimeNotification(
+      'Modifications Assistant IA appliquées',
+      `${pendingAiProposal.swaps.length} permutation(s) validées après contrôle du moteur de contraintes.`,
+      'ai_generated',
+      'all'
+    );
+    setPendingAiProposal(null);
   };
 
   // Run Gemini AI Class Optimization
@@ -571,7 +1118,11 @@ export default function App() {
       });
 
       const relevantConstraints = teachers
-        .filter((t) => classTeachers.has(t.name.toLowerCase()) && t.unavailableSlots.length > 0)
+        .filter(
+          (t) =>
+            classTeachers.has(t.name.toLowerCase()) &&
+            t.unavailableSlots.length > 0
+        )
         .map((t) => ({
           teacher: t.name,
           unavailableSlots: t.unavailableSlots,
@@ -594,6 +1145,7 @@ export default function App() {
           teacherConstraints: relevantConstraints,
           customInstructions: aiCustomPrompt,
           maxPeriodsPerDay: maxPeriods,
+          lockedSlots: lockedSlotsByClass[selectedClass.id] || [],
         }),
       });
 
@@ -603,8 +1155,13 @@ export default function App() {
       }
 
       if (Array.isArray(data.slots) && data.slots.length > 0) {
-        const nextSlots: Record<string, LessonSlot> = {};
+        const nextSlots: Record<string, LessonSlot> = {
+          ...selectedClass.slots,
+        };
+        const locked = new Set(lockedSlotsByClass[selectedClass.id] || []);
         for (const item of data.slots) {
+          const k = `${item.day}_${item.period}`;
+          if (locked.has(k)) continue; // Strictly protect locked slots (HC_04)
           if (item.day && item.period && item.subject && item.teacher) {
             const slotObj: LessonSlot = {
               subject: item.subject,
@@ -614,7 +1171,7 @@ export default function App() {
               slotObj.subSubject = item.subSubject;
               slotObj.subTeacher = item.subTeacher;
             }
-            nextSlots[`${item.day}_${item.period}`] = slotObj;
+            nextSlots[k] = slotObj;
           }
         }
         await saveClassToStore({
@@ -627,6 +1184,10 @@ export default function App() {
         summary: data.summary,
         pedagogicalScore: data.pedagogicalScore,
       });
+      appendAuditLog(
+        `Optimisation Gemini IA (${selectedClass.name})`,
+        data.summary || 'Grille optimisée.'
+      );
     } catch (err: unknown) {
       setAiResultSummary({
         summary:
@@ -675,10 +1236,17 @@ export default function App() {
         if (temp) {
           nextSlots[data.toSlotKey] = temp;
         }
-        await saveClassToStore({
-          ...targetClass,
-          slots: nextSlots,
-        });
+        await saveClassToStore(
+          {
+            ...targetClass,
+            slots: nextSlots,
+          },
+          [data.fromSlotKey, data.toSlotKey]
+        );
+        appendAuditLog(
+          `Conflit résolu (${conflict.teacher})`,
+          `${targetClass.name} : ${data.fromSlotKey} ↔ ${data.toSlotKey}`
+        );
       }
     } catch (e) {
       console.error('Conflict resolution error:', e);
@@ -687,8 +1255,157 @@ export default function App() {
     }
   };
 
-  // Download Standalone Printable Landscape HTML (PDF Ready)
-  const handleDownloadLandscapeHtml = (mode: 'single_class' | 'single_teacher' | 'all_classes') => {
+  // Repair ALL conflicts automatically using the CP-SAT solver
+  const handleRepairAllConflicts = async () => {
+    const proposals = generateRankedProposals(
+      classes,
+      teachers,
+      lockedSlotsByClass
+    );
+    const best = proposals[0];
+    if (best) {
+      await handleApplyProposal(best);
+    }
+  };
+
+  // Absent Teacher & Substitute Candidates
+  const absentTeacherObj = useMemo(
+    () => teachers.find((t) => t.id === absentTeacherId) || teachers[0],
+    [teachers, absentTeacherId]
+  );
+
+  const absentTeacherLessonAtSlot = useMemo(() => {
+    if (!absentTeacherObj) return null;
+    const sched = buildTeacherTimetable(absentTeacherObj.name, classes);
+    return sched.slots[`${absentDay}_${absentPeriod}`] || null;
+  }, [absentTeacherObj, absentDay, absentPeriod, classes]);
+
+  const substituteCandidates = useMemo(() => {
+    if (!absentTeacherObj) return [];
+    const subjNeeded =
+      absentTeacherLessonAtSlot?.subject ||
+      absentTeacherObj.subjects[0] ||
+      'English';
+    return findSubstituteCandidates(
+      absentTeacherObj.name,
+      subjNeeded,
+      absentTeacherObj.section,
+      absentDay,
+      absentPeriod,
+      classes,
+      teachers
+    );
+  }, [
+    absentTeacherObj,
+    absentTeacherLessonAtSlot,
+    absentDay,
+    absentPeriod,
+    classes,
+    teachers,
+  ]);
+
+  const handleAssignSubstitute = async (subTeacherName: string) => {
+    if (!absentTeacherObj) return;
+    const slotKey = `${absentDay}_${absentPeriod}`;
+    // Find the class where absentTeacherObj teaches at slotKey
+    const targetClass = classes.find((c) => {
+      const s = c.slots[slotKey];
+      return (
+        s &&
+        s.teacher.trim().toLowerCase() ===
+          absentTeacherObj.name.trim().toLowerCase()
+      );
+    });
+
+    if (!targetClass) {
+      await triggerRealtimeNotification(
+        `Remplacement préventif enregistré`,
+        `${subTeacherName} est désigné(e) remplaçant(e) de ${absentTeacherObj.name} le ${absentDay} (P${absentPeriod}).`,
+        'teacher_assigned',
+        subTeacherName
+      );
+      return;
+    }
+
+    const nextSlots = {
+      ...targetClass.slots,
+      [slotKey]: {
+        ...targetClass.slots[slotKey],
+        teacher: subTeacherName,
+      },
+    };
+
+    await saveClassToStore(
+      { ...targetClass, slots: nextSlots },
+      [slotKey]
+    );
+    appendAuditLog(
+      `Remplacement absence (${targetClass.name})`,
+      `${subTeacherName} remplace ${absentTeacherObj.name} le ${absentDay} P${absentPeriod}.`
+    );
+    await triggerRealtimeNotification(
+      `Remplacement validé : ${targetClass.name} (${absentDay} P${absentPeriod})`,
+      `${subTeacherName} remplace ${absentTeacherObj.name} pour le cours de ${targetClass.slots[slotKey].subject}.`,
+      'teacher_assigned',
+      subTeacherName
+    );
+  };
+
+  // Duplicate School Year Handler
+  const handleDuplicateSchoolYear = async () => {
+    const nextYear = schoolYear === '2026-2027' ? '2027-2028' : '2028-2029';
+    setSchoolYear(nextYear);
+    setBestVersionSnapshot(classes);
+    appendAuditLog(
+      `Duplication d'année scolaire`,
+      `Données, enseignants, salles et grilles clonés vers l'année ${nextYear}.`
+    );
+    await triggerRealtimeNotification(
+      `Année scolaire dupliquée vers ${nextYear}`,
+      `Les ${classes.length} classes, ${teachers.length} enseignants et contraintes ont été conservés pour ${nextYear}.`,
+      'schedule_updated',
+      'all'
+    );
+  };
+
+  // Apply Validated CSV Import
+  const handleApplyValidatedCsvImport = async () => {
+    if (!csvValidationResult || csvValidationResult.rows.length === 0) return;
+    const nextClasses = classes.map((c) => ({ ...c, slots: { ...c.slots } }));
+
+    for (const row of csvValidationResult.rows) {
+      const target = nextClasses.find(
+        (c) => c.name.toLowerCase() === row.className.toLowerCase()
+      );
+      if (target) {
+        target.slots[`${row.day}_${row.period}`] = {
+          subject: row.subject,
+          teacher: row.teacher,
+          subSubject: row.subSubject,
+          subTeacher: row.subTeacher,
+        };
+      }
+    }
+
+    recordHistoryAndSetClasses(nextClasses);
+    appendAuditLog(
+      'Importation Excel / CSV validée',
+      `${csvValidationResult.rows.length} séances importées et contrôlées.`
+    );
+    await triggerRealtimeNotification(
+      'Importation Excel/CSV appliquée',
+      `${csvValidationResult.rows.length} séances mises à jour après validation.`,
+      'schedule_updated',
+      'all'
+    );
+    setCsvValidationResult(null);
+    setCsvImportText('');
+  };
+
+  // Export Handlers
+  const handleDownloadLandscapeHtml = (
+    mode: 'single_class' | 'single_teacher' | 'all_classes'
+  ) => {
     let sheets: Array<{
       title: string;
       subtitle?: string;
@@ -700,7 +1417,7 @@ export default function App() {
       sheets = [
         {
           title: selectedClass.name,
-          subtitle: SCHOOL_INFO.subtitle,
+          subtitle: `${SCHOOL_INFO.subtitle} · Année ${schoolYear}`,
           section: selectedClass.section,
           slots: selectedClass.slots,
         },
@@ -709,7 +1426,9 @@ export default function App() {
       sheets = [
         {
           title: `Enseignant : ${selectedTeacher.name}`,
-          subtitle: `${SCHOOL_INFO.subtitle} · Matières : ${selectedTeacher.subjects.join(', ')}`,
+          subtitle: `${SCHOOL_INFO.subtitle} · Matières : ${selectedTeacher.subjects.join(
+            ', '
+          )}`,
           section: 'Primary',
           slots: selectedTeacherSchedule.slots,
         },
@@ -717,7 +1436,7 @@ export default function App() {
     } else {
       sheets = classes.map((c) => ({
         title: c.name,
-        subtitle: SCHOOL_INFO.subtitle,
+        subtitle: `${SCHOOL_INFO.subtitle} · Année ${schoolYear}`,
         section: c.section,
         slots: c.slots,
       }));
@@ -741,232 +1460,325 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const handleDownloadDatabaseExport = (format: 'mysql' | 'mongodb') => {
-    const content =
-      format === 'mysql'
-        ? generateMySqlDump(classes, teachers)
-        : generateMongoAtlasExport(classes, teachers);
-    const mime = format === 'mysql' ? 'application/sql' : 'application/json';
-    const ext = format === 'mysql' ? 'sql' : 'json';
-    const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const handleDownloadFile = (
+    content: string,
+    filename: string,
+    mimeType: string
+  ) => {
+    const blob = new Blob([content], { type: `${mimeType};charset=utf-8` });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `alkawthar_timetables_${format}_export.${ext}`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   };
 
+  const tStrings = I18N[lang];
+
   return (
-    <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900">
-      {/* TOP BAR CONTRACT: 3 clean zones separated by gap-8 */}
-      <header className="flex items-center justify-between gap-8 px-6 py-3.5 bg-white border-b border-slate-200 no-print sticky top-0 z-30">
+    <div
+      dir={lang === 'ar' ? 'rtl' : 'ltr'}
+      className={`min-h-screen flex flex-col transition-colors ${
+        darkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'
+      }`}
+    >
+      {/* =====================================================================
+          TOP BAR CONTRACT: 3 clean zones separated by gap-8
+         ===================================================================== */}
+      <header
+        className={`flex items-center justify-between gap-8 px-6 py-3.5 border-b no-print sticky top-0 z-30 ${
+          darkMode
+            ? 'bg-slate-900 border-slate-800 text-white'
+            : 'bg-white border-slate-200 text-slate-950'
+        }`}
+      >
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#top"
           onClick={(e) => {
             e.preventDefault();
-            setActiveTab('classes');
+            setActiveTab('editor');
           }}
-          className="text-lg font-bold tracking-tight text-slate-950 whitespace-nowrap shrink-0"
+          className="text-lg font-bold tracking-tight whitespace-nowrap shrink-0"
         >
           ChronoScolaire AI
         </a>
 
         {/* Zone 2: 5 concise single-line navigation links */}
-        <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-slate-600">
-          <button
-            onClick={() => setActiveTab('classes')}
-            className={`hover:text-slate-950 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'classes'
-                ? 'text-slate-950 border-b-2 border-slate-950 font-semibold'
-                : ''
-            }`}
-          >
-            Grilles des Classes
-          </button>
-          <button
-            onClick={() => setActiveTab('teachers_panel')}
-            className={`hover:text-slate-950 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'teachers_panel'
-                ? 'text-slate-950 border-b-2 border-slate-950 font-semibold'
-                : ''
-            }`}
-          >
-            Affectation Enseignants
-          </button>
-          <button
-            onClick={() => setActiveTab('availability')}
-            className={`hover:text-slate-950 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'availability'
-                ? 'text-slate-950 border-b-2 border-slate-950 font-semibold'
-                : ''
-            }`}
-          >
-            Disponibilités
-          </button>
-          <button
-            onClick={() => setActiveTab('ai_optimizer')}
-            className={`hover:text-slate-950 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'ai_optimizer'
-                ? 'text-slate-950 border-b-2 border-slate-950 font-semibold'
-                : ''
-            }`}
-          >
-            Planificateur Gemini IA
-          </button>
-          <button
-            onClick={() => setActiveTab('print_export')}
-            className={`hover:text-slate-950 transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-              activeTab === 'print_export'
-                ? 'text-slate-950 border-b-2 border-slate-950 font-semibold'
-                : ''
-            }`}
-          >
-            Impression PDF & Export DB
-          </button>
+        <nav className="hidden lg:flex items-center gap-6 text-sm font-medium">
+          {(
+            [
+              ['editor', tStrings.navEditor],
+              ['teachers', tStrings.navTeachers],
+              ['ai_csp', tStrings.navAiCsp],
+              ['resources', tStrings.navResources],
+              ['reports_export', tStrings.navReports],
+            ] as const
+          ).map(([tabKey, label]) => (
+            <button
+              key={tabKey}
+              onClick={() => setActiveTab(tabKey)}
+              className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
+                activeTab === tabKey
+                  ? darkMode
+                    ? 'text-white border-b-2 border-sky-400 font-semibold'
+                    : 'text-slate-950 border-b-2 border-slate-950 font-semibold'
+                  : darkMode
+                  ? 'text-slate-400 hover:text-white'
+                  : 'text-slate-600 hover:text-slate-950'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </nav>
 
-        {/* Zone 3: Primary action */}
+        {/* Zone 3: 1 primary action */}
         <div className="flex items-center gap-3 shrink-0">
           <button
             onClick={() => window.print()}
             className="px-4 py-2 text-xs font-semibold text-white bg-sky-700 rounded-lg hover:bg-sky-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
           >
             <Printer className="w-3.5 h-3.5" />
-            <span>Imprimer PDF Paysage</span>
+            <span>{tStrings.printPdfBtn}</span>
           </button>
         </div>
       </header>
 
-      {/* WORKSPACE SUB-TOOLBAR (Role Toggle, School Context, Notifications, Auth) */}
-      <div className="bg-white border-b border-slate-200 px-6 py-2.5 no-print">
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4">
-          {/* Left: School metadata with clean typographic separators (Zero-Pill discipline) */}
-          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
-            <span className="font-semibold text-slate-900">
-              {SCHOOL_INFO.name}
+      {/* =====================================================================
+          WORKSPACE GOVERNANCE BAR (Multi-Campus, Scenario, Undo/Redo, Role, Lang, Theme)
+         ===================================================================== */}
+      <div
+        className={`border-b px-6 py-2.5 no-print ${
+          darkMode
+            ? 'bg-slate-900/80 border-slate-800'
+            : 'bg-white border-slate-200'
+        }`}
+      >
+        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
+          {/* Left: Multi-Campus, Year, Scenario & Quality Score */}
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <select
+              value={selectedCampus}
+              onChange={(e) => setSelectedCampus(e.target.value)}
+              aria-label="Sélectionner l'établissement"
+              className={`px-2.5 py-1 rounded border text-xs font-medium ${
+                darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-100'
+                  : 'bg-slate-50 border-slate-200 text-slate-900'
+              }`}
+            >
+              <option value="Al-Kawthar — Campus Principal Jeddah">
+                Al-Kawthar — Campus Principal Jeddah
+              </option>
+              <option value="Al-Kawthar — Section Francophone & IB">
+                Al-Kawthar — Section Francophone & IB
+              </option>
+              <option value="Al-Kawthar — Section Américaine & Internationale">
+                Al-Kawthar — Section Américaine & Internationale
+              </option>
+            </select>
+
+            <span aria-hidden="true" className="text-slate-400">
+              ·
             </span>
-            <span aria-hidden="true">·</span>
-            <span className="tabular-nums">{classes.length} Classes (Pre-KG à DP2)</span>
-            <span aria-hidden="true">·</span>
-            <span className="tabular-nums">{teachers.length} Enseignants</span>
-            <span aria-hidden="true">·</span>
+
+            <select
+              value={scenario}
+              onChange={(e) => setScenario(e.target.value as ScheduleScenario)}
+              aria-label="Scénario horaire"
+              className={`px-2.5 py-1 rounded border text-xs font-medium ${
+                darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-100'
+                  : 'bg-slate-50 border-slate-200 text-slate-900'
+              }`}
+            >
+              <option value="standard">Scénario : Standard ({schoolYear})</option>
+              <option value="ramadan">Scénario : Horaire Ramadan (35m)</option>
+              <option value="summer">Scénario : Horaire d'Été</option>
+              <option value="exams">Scénario : Semaine d'Examens</option>
+            </select>
+
+            <span aria-hidden="true" className="text-slate-400">
+              ·
+            </span>
+
+            <span className="tabular-nums font-medium">
+              Qualité : {qualityReport.globalScore}/100
+            </span>
+
+            <span aria-hidden="true" className="text-slate-400">
+              ·
+            </span>
+
             <span className="tabular-nums">
               {conflicts.length === 0
-                ? '0 conflit détecté'
-                : `${conflicts.length} point(s) d'attention`}
+                ? '0 conflit'
+                : `${conflicts.length} alerte(s)`}
             </span>
-            {isSyncedWithCloud && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span className="text-emerald-700 font-medium">
-                  Base persistante synchronisée
-                </span>
-              </>
-            )}
+
+            <span aria-hidden="true" className="text-slate-400">
+              ·
+            </span>
+
+            <button
+              onClick={() =>
+                setPublicationStatus((s) =>
+                  s === 'published' ? 'draft' : 'published'
+                )
+              }
+              className={`underline font-medium ${
+                publicationStatus === 'published'
+                  ? 'text-emerald-600'
+                  : 'text-amber-600'
+              }`}
+            >
+              {publicationStatus === 'published'
+                ? 'Statut : Publié & Validé'
+                : 'Statut : Version Provisoire'}
+            </button>
           </div>
 
-          {/* Right: Interactive Role Switcher, Notification Bell & User Auth */}
-          <div className="flex items-center gap-3">
-            {/* Segmented Functional Control: Admin vs Professeur */}
-            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
+          {/* Right: Undo/Redo, Role Selector, Language FR/AR/EN, Dark Mode, Notifications, Auth */}
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Undo / Redo */}
+            <div className="flex items-center gap-1">
               <button
-                onClick={() => setRoleMode('admin')}
-                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                  roleMode === 'admin'
-                    ? 'bg-white text-slate-950 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-950'
+                onClick={handleUndo}
+                disabled={historyPast.length === 0}
+                title="Annuler la dernière modification (Undo)"
+                className={`p-1.5 rounded border disabled:opacity-40 ${
+                  darkMode
+                    ? 'border-slate-700 hover:bg-slate-800'
+                    : 'border-slate-200 hover:bg-slate-100'
                 }`}
               >
-                Vue Administrateur
+                <RotateCcw className="w-3.5 h-3.5" />
               </button>
               <button
-                onClick={() => {
-                  setRoleMode('teacher');
-                  setActiveTab('teachers_panel');
-                }}
-                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                  roleMode === 'teacher'
-                    ? 'bg-white text-slate-950 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-950'
+                onClick={handleRedo}
+                disabled={historyFuture.length === 0}
+                title="Rétablir la modification (Redo)"
+                className={`p-1.5 rounded border disabled:opacity-40 ${
+                  darkMode
+                    ? 'border-slate-700 hover:bg-slate-800'
+                    : 'border-slate-200 hover:bg-slate-100'
                 }`}
               >
-                Portail Professeur
+                <RotateCw className="w-3.5 h-3.5" />
               </button>
             </div>
 
-            {/* Real-Time Notifications Trigger */}
+            {/* Role Selector */}
+            <select
+              value={roleMode}
+              onChange={(e) => {
+                const nextRole = e.target.value as UserRole;
+                setRoleMode(nextRole);
+                if (nextRole === 'teacher') {
+                  setGridViewMode('teacher');
+                }
+              }}
+              aria-label="Rôle utilisateur"
+              className={`px-2.5 py-1 rounded border text-xs font-medium ${
+                darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-100'
+                  : 'bg-slate-100 border-slate-200 text-slate-800'
+              }`}
+            >
+              <option value="admin">Rôle : Administrateur Principal</option>
+              <option value="section_head">Rôle : Responsable de Section</option>
+              <option value="coordinator">Rôle : Coordinateur Pédagogique</option>
+              <option value="teacher">Rôle : Portail Enseignant</option>
+            </select>
+
+            {/* Language Selector FR / AR / EN */}
+            <div
+              className={`flex items-center p-0.5 rounded border text-xs ${
+                darkMode
+                  ? 'bg-slate-800 border-slate-700'
+                  : 'bg-slate-100 border-slate-200'
+              }`}
+            >
+              {(['fr', 'ar', 'en'] as const).map((l) => (
+                <button
+                  key={l}
+                  onClick={() => setLang(l)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-semibold uppercase transition-colors ${
+                    lang === l
+                      ? 'bg-sky-700 text-white'
+                      : 'text-slate-500 hover:text-slate-900'
+                  }`}
+                >
+                  {l === 'ar' ? 'عربي' : l.toUpperCase()}
+                </button>
+              ))}
+            </div>
+
+            {/* Dark Mode Toggle */}
+            <button
+              onClick={() => setDarkMode((d) => !d)}
+              className={`p-1.5 rounded border ${
+                darkMode
+                  ? 'border-slate-700 text-amber-400 hover:bg-slate-800'
+                  : 'border-slate-200 text-slate-700 hover:bg-slate-100'
+              }`}
+              title={darkMode ? 'Mode Clair' : 'Mode Sombre'}
+            >
+              {darkMode ? (
+                <Sun className="w-3.5 h-3.5" />
+              ) : (
+                <Moon className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            {/* Notifications & Audit Log Button */}
             <button
               onClick={() => {
                 setShowNotifDrawer(true);
                 setUnreadCount(0);
               }}
-              className="relative px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-              title="Notifications en temps réel"
+              className={`px-2.5 py-1 text-xs font-medium rounded border flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
+                  : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+              }`}
             >
-              <Bell className="w-3.5 h-3.5 text-slate-700" />
-              <span>Notifications</span>
+              <Bell className="w-3.5 h-3.5" />
+              <span>Journal</span>
               {unreadCount > 0 && (
-                <span className="font-mono text-[11px] font-bold text-sky-700 tabular-nums">
+                <span className="font-mono text-[11px] font-bold text-sky-600 tabular-nums">
                   ({unreadCount})
                 </span>
               )}
             </button>
 
-            {/* Firebase Auth Sign-In / Sign-Out */}
+            {/* Cloud Auth */}
             {user ? (
-              <div className="flex items-center gap-2 text-xs text-slate-700">
-                <span className="font-medium truncate max-w-[140px]">
-                  {user.displayName || user.email}
-                </span>
-                <button
-                  onClick={() => signOut(auth)}
-                  className="px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-lg transition-colors flex items-center gap-1 whitespace-nowrap shrink-0"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>Déconnexion</span>
-                </button>
-              </div>
+              <button
+                onClick={() => signOut(auth)}
+                className="px-2.5 py-1 text-xs font-medium border border-slate-300 rounded flex items-center gap-1 whitespace-nowrap shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Déconnexion</span>
+              </button>
             ) : (
               <button
                 onClick={() => signInWithPopup(auth, googleProvider)}
-                className="px-3 py-1.5 text-xs font-medium text-slate-800 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                className="px-2.5 py-1 text-xs font-medium border border-slate-300 rounded flex items-center gap-1 whitespace-nowrap shrink-0"
               >
                 <LogIn className="w-3.5 h-3.5" />
-                <span>Connexion Cloud</span>
+                <span>Cloud Sync</span>
               </button>
             )}
           </div>
         </div>
-
-        {/* Mobile Navigation Bar */}
-        <div className="flex lg:hidden items-center gap-2 overflow-x-auto pt-2 mt-2 border-t border-slate-100">
-          {[
-            { id: 'classes', label: 'Classes' },
-            { id: 'teachers_panel', label: 'Enseignants' },
-            { id: 'availability', label: 'Disponibilités' },
-            { id: 'ai_optimizer', label: 'Gemini IA' },
-            { id: 'print_export', label: 'PDF & Export' },
-          ].map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setActiveTab(t.id as ActiveTab)}
-              className={`px-3 py-1 text-xs font-medium rounded-md whitespace-nowrap shrink-0 ${
-                activeTab === t.id
-                  ? 'bg-slate-900 text-white'
-                  : 'text-slate-600 hover:bg-slate-100'
-              }`}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
       </div>
 
-      {/* LIVE REAL-TIME TOAST BANNER */}
+      {/* LIVE TOAST NOTIFICATION */}
       {liveToast && (
         <div className="fixed bottom-5 right-5 z-50 max-w-md bg-slate-900 text-white px-4 py-3 rounded-lg shadow-lg border border-slate-700 flex items-start gap-3 no-print">
           <Bell className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
@@ -987,22 +1799,50 @@ export default function App() {
         </div>
       )}
 
-      {/* MAIN CONTENT VIEWPORT */}
+      {/* =====================================================================
+          MAIN WORKSPACE CONTENT
+         ===================================================================== */}
       <main className="flex-1 max-w-[1440px] w-full mx-auto px-6 py-6">
         {/* ===================================================================
-            TAB 1: GRILLES DES CLASSES (35 CLASSES AL-KAWTHAR)
+            MODULE 1: ÉDITEUR VISUEL INTERACTIF (CLASSE / PROF / SALLE / MATIÈRE)
            =================================================================== */}
-        {activeTab === 'classes' && (
+        {activeTab === 'editor' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Sidebar: Class Directory & Section Filter */}
-            <aside className="lg:col-span-3 bg-white border border-slate-200 rounded-lg p-4 no-print">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Classes Al-Kawthar
-                </h2>
-                <span className="text-xs font-mono text-slate-500 tabular-nums">
-                  {filteredClasses.length}/{classes.length}
-                </span>
+            {/* Left Sidebar: View Mode Selector + Entity Directory */}
+            <aside
+              className={`lg:col-span-3 border rounded-lg p-4 no-print ${
+                darkMode
+                  ? 'bg-slate-900 border-slate-800'
+                  : 'bg-white border-slate-200'
+              }`}
+            >
+              {/* 4 View Modes: Classe, Enseignant, Salle, Matière */}
+              <div className="mb-3">
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1.5">
+                  Mode d'affichage de la grille
+                </label>
+                <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg">
+                  {(
+                    [
+                      ['class', 'Par Classe'],
+                      ['teacher', 'Par Professeur'],
+                      ['room', 'Par Salle'],
+                      ['subject', 'Par Matière'],
+                    ] as const
+                  ).map(([mKey, mLabel]) => (
+                    <button
+                      key={mKey}
+                      onClick={() => setGridViewMode(mKey)}
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                        gridViewMode === mKey
+                          ? 'bg-white text-slate-950 shadow-xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      {mLabel}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Search Input */}
@@ -1012,400 +1852,611 @@ export default function App() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Rechercher classe, prof, matière..."
-                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:border-sky-600"
+                  placeholder="Recherche instantanée..."
+                  className={`w-full pl-8 pr-3 py-1.5 text-xs border rounded-md focus:outline-none focus:border-sky-600 ${
+                    darkMode
+                      ? 'bg-slate-800 border-slate-700 text-white'
+                      : 'bg-slate-50 border-slate-200 text-slate-900'
+                  }`}
                 />
               </div>
 
-              {/* Section Filter Buttons */}
-              <div className="flex flex-wrap gap-1 mb-3 pb-3 border-b border-slate-100">
-                {(
-                  [
-                    ['ALL', 'Toutes'],
-                    ['KG', 'KG / Mat.'],
-                    ['KG3_GS', 'KG3 & GS'],
-                    ['Primary', 'Primaire'],
-                    ['Secondary_Girls', 'Sec. Filles'],
-                    ['Secondary_Boys', 'Sec. Garçons'],
-                  ] as const
-                ).map(([secKey, label]) => (
-                  <button
-                    key={secKey}
-                    onClick={() => setSelectedSection(secKey)}
-                    className={`px-2.5 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                      selectedSection === secKey
-                        ? 'bg-slate-900 text-white'
-                        : 'bg-slate-100 text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              {/* Directory List depending on gridViewMode */}
+              {gridViewMode === 'class' && (
+                <>
+                  <div className="flex flex-wrap gap-1 mb-3 pb-3 border-b border-slate-200/60">
+                    {(
+                      [
+                        ['ALL', 'Toutes'],
+                        ['KG', 'KG'],
+                        ['KG3_GS', 'KG3/GS'],
+                        ['Primary', 'Primaire'],
+                        ['Secondary_Girls', 'Sec. Filles'],
+                        ['Secondary_Boys', 'Sec. Garçons'],
+                      ] as const
+                    ).map(([secKey, label]) => (
+                      <button
+                        key={secKey}
+                        onClick={() => setSelectedSection(secKey)}
+                        className={`px-2 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                          selectedSection === secKey
+                            ? 'bg-sky-700 text-white'
+                            : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
 
-              {/* Scrollable Class List */}
-              <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
-                {filteredClasses.map((cls) => {
-                  const slotCount = Object.keys(cls.slots).length;
-                  const isSelected = cls.id === selectedClass.id;
-                  return (
-                    <button
-                      key={cls.id}
-                      onClick={() => setSelectedClassId(cls.id)}
-                      className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
-                        isSelected
-                          ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
-                          : 'text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      <span className="truncate">{cls.name}</span>
-                      <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                        {slotCount}p
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
+                  <div className="space-y-1 max-h-[500px] overflow-y-auto pr-1">
+                    {filteredClasses.map((cls) => {
+                      const slotCount = Object.keys(cls.slots).length;
+                      const isSelected = cls.id === selectedClass.id;
+                      const lockedCount = (lockedSlotsByClass[cls.id] || []).length;
+                      return (
+                        <button
+                          key={cls.id}
+                          onClick={() => setSelectedClassId(cls.id)}
+                          className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                            isSelected
+                              ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                              : 'hover:bg-slate-100/60'
+                          }`}
+                        >
+                          <span className="truncate">{cls.name}</span>
+                          <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                            {slotCount}p {lockedCount > 0 ? `· ${lockedCount}v` : ''}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+
+              {gridViewMode === 'teacher' && (
+                <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
+                  {filteredTeachers.map((t) => {
+                    const stats = buildTeacherTimetable(t.name, classes);
+                    const isSelected = t.id === selectedTeacher?.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => setSelectedTeacherId(t.id)}
+                        className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                          isSelected
+                            ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                            : 'hover:bg-slate-100/60'
+                        }`}
+                      >
+                        <span className="truncate">{t.name}</span>
+                        <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                          {stats.totalPeriods}p/sem
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {gridViewMode === 'room' && (
+                <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
+                  {rooms.map((r) => {
+                    const isSelected = r.id === selectedRoom.id;
+                    return (
+                      <button
+                        key={r.id}
+                        onClick={() => setSelectedRoomId(r.id)}
+                        className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                          isSelected
+                            ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                            : 'hover:bg-slate-100/60'
+                        }`}
+                      >
+                        <span className="truncate">{r.name}</span>
+                        <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                          {r.capacity} pl.
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {gridViewMode === 'subject' && (
+                <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
+                  {subjectConfigs.map((sub) => {
+                    const isSelected =
+                      sub.name.toLowerCase() ===
+                      selectedSubjectFilter.toLowerCase();
+                    return (
+                      <button
+                        key={sub.id}
+                        onClick={() => setSelectedSubjectFilter(sub.name)}
+                        className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                          isSelected
+                            ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                            : 'hover:bg-slate-100/60'
+                        }`}
+                      >
+                        <span className="truncate">{sub.name}</span>
+                        <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                          Coeff {sub.weight}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </aside>
 
-            {/* Main Timetable Area */}
+            {/* Right Main Column: Interactive Toolbar + Landscape Timetable Grid */}
             <section className="lg:col-span-9 space-y-4">
-              {/* Action & Context Bar above the sheet */}
-              <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 no-print">
+              {/* Post-Modification Smart Optimization Toolbar (Point 8) */}
+              <div
+                className={`border rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 no-print ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
                 <div>
-                  <div className="flex items-center gap-2">
-                    <h1 className="text-xl font-bold text-slate-950">
-                      Classe : {selectedClass.name}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h1 className="text-lg font-bold">
+                      {gridViewMode === 'class' && `Classe : ${selectedClass.name}`}
+                      {gridViewMode === 'teacher' &&
+                        `Enseignant : ${selectedTeacher?.name}`}
+                      {gridViewMode === 'room' && `Salle : ${selectedRoom.name}`}
+                      {gridViewMode === 'subject' &&
+                        `Matière : ${selectedSubjectFilter}`}
                     </h1>
-                    <span className="text-xs text-slate-400" aria-hidden="true">
+                    <span aria-hidden="true" className="text-slate-400">
                       ·
                     </span>
-                    <span className="text-xs text-slate-600">
-                      {SECTION_LABELS[selectedClass.section]}
+                    <span className="text-xs text-slate-500">
+                      Glisser-déposer pour permuter · Cadenas pour verrouiller une séance
                     </span>
                   </div>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Cliquez sur n'importe quelle case horaire pour modifier la matière, l'enseignant ou ajouter un sous-groupe (ex. Easy Arabic).
-                  </p>
                 </div>
 
+                {/* Smart Post-Modification Actions (Point 8) */}
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    onClick={() => setActiveTab('ai_optimizer')}
-                    className="px-3.5 py-2 text-xs font-semibold text-sky-800 bg-sky-50 border border-sky-200 rounded-lg hover:bg-sky-100 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    onClick={handleRunGeminiOptimizeClass}
+                    disabled={isAiRunning}
+                    className="px-3 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 border border-sky-200 rounded-md hover:bg-sky-100 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
-                    <span>Optimiser avec Gemini IA</span>
+                    <span>Optimiser cette classe</span>
                   </button>
+
                   <button
-                    onClick={() => handleDownloadLandscapeHtml('single_class')}
-                    className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    onClick={() => {
+                      setActiveTab('ai_csp');
+                      handleGenerateMultiProposals('all');
+                    }}
+                    className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>HTML Paysage (PDF)</span>
+                    Optimiser tout l'établissement
                   </button>
+
+                  {conflicts.length > 0 && (
+                    <button
+                      onClick={handleRepairAllConflicts}
+                      className="px-3 py-1.5 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-md transition-colors whitespace-nowrap shrink-0"
+                    >
+                      Réparer tous les conflits ({conflicts.length})
+                    </button>
+                  )}
+
                   <button
-                    onClick={() => window.print()}
-                    className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    onClick={() => {
+                      recordHistoryAndSetClasses(bestVersionSnapshot);
+                      appendAuditLog(
+                        'Restauration meilleure version',
+                        'Retour à la version de référence validée.'
+                      );
+                    }}
+                    className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
                   >
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>Imprimer cette grille</span>
+                    Restaurer version de référence
                   </button>
                 </div>
               </div>
 
-              {/* Printable Landscape Timetable Sheet */}
-              <LandscapeTimetableSheet
-                title={selectedClass.name}
-                section={selectedClass.section}
-                slots={selectedClass.slots}
-                editable={roleMode === 'admin'}
-                conflictSlotKeys={selectedClassConflictKeys}
-                onSlotClick={handleOpenSlotEditor}
-              />
+              {/* Timetable Grid Sheet */}
+              {gridViewMode === 'class' && (
+                <LandscapeTimetableSheet
+                  title={selectedClass.name}
+                  subtitle={`${selectedCampus} · ${SCHOOL_INFO.subtitle} · Scénario ${scenario.toUpperCase()}`}
+                  section={selectedClass.section}
+                  slots={selectedClass.slots}
+                  editable={roleMode !== 'teacher'}
+                  conflictSlotKeys={selectedClassConflictKeys}
+                  lockedSlotKeys={
+                    new Set(lockedSlotsByClass[selectedClass.id] || [])
+                  }
+                  modifiedSlotKeys={
+                    new Set(modifiedSlotsByClass[selectedClass.id] || [])
+                  }
+                  onSlotClick={handleOpenSlotEditor}
+                  onSlotSwap={handleDragDropSlotSwap}
+                  onToggleLockSlot={handleToggleLockSlot}
+                />
+              )}
+
+              {gridViewMode === 'teacher' && selectedTeacher && (
+                <LandscapeTimetableSheet
+                  title={`Prof. ${selectedTeacher.name}`}
+                  subtitle={`${SCHOOL_INFO.subtitle} · Matières : ${selectedTeacher.subjects.join(
+                    ', '
+                  )} · Charge : ${selectedTeacherSchedule.totalPeriods}p/sem`}
+                  section="Primary"
+                  slots={selectedTeacherSchedule.slots}
+                  isTeacherView={true}
+                  unavailableSlotKeys={new Set(selectedTeacher.unavailableSlots)}
+                />
+              )}
+
+              {gridViewMode === 'room' && (
+                <LandscapeTimetableSheet
+                  title={selectedRoom.name}
+                  subtitle={`${selectedRoom.campus} · Capacité : ${selectedRoom.capacity} élèves · Équipements : ${selectedRoom.equipment.join(
+                    ', '
+                  )}`}
+                  section="Primary"
+                  slots={selectedRoomSchedule}
+                  isTeacherView={true}
+                />
+              )}
+
+              {gridViewMode === 'subject' && (
+                <LandscapeTimetableSheet
+                  title={`Matière : ${selectedSubjectFilter}`}
+                  subtitle={`Répartition hebdomadaire inter-classes — ${SCHOOL_INFO.name}`}
+                  section="Primary"
+                  slots={selectedSubjectSchedule}
+                  isTeacherView={true}
+                />
+              )}
             </section>
           </div>
         )}
 
         {/* ===================================================================
-            TAB 2: PANNEAU DE GESTION & AFFECTATION PAR DÉFAUT AUX ENSEIGNANTS
+            MODULE 2: GESTION DES ENSEIGNANTS, DISPONIBILITÉS & REMPLACEMENTS
            =================================================================== */}
-        {activeTab === 'teachers_panel' && (
+        {activeTab === 'teachers' && (
           <div className="space-y-6">
-            {/* Top Banner: Apply Default Timetables to Teachers */}
-            <div className="bg-white border border-slate-200 rounded-lg p-5 flex flex-wrap items-center justify-between gap-4 no-print">
-              <div className="max-w-2xl">
-                <h1 className="text-xl font-bold text-slate-950">
-                  Panneau de Gestion — Affectation des Emplois du Temps par Défaut aux Enseignants
-                </h1>
-                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                  Appliquez et consolidez automatiquement les emplois du temps officiels Al-Kawthar (Pre-KG à DP2 Garçons) pour chacun des {teachers.length} enseignants. Chaque professeur dispose immédiatement de sa grille individuelle consolidée, de son volume horaire et de ses notifications en temps réel.
-                </p>
+            {/* Sub-Navigation Bar for Teachers Module */}
+            <div
+              className={`border rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 no-print ${
+                darkMode
+                  ? 'bg-slate-900 border-slate-800'
+                  : 'bg-white border-slate-200'
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                {(
+                  [
+                    ['directory', '1. Affectation par Défaut & Charges Horaires'],
+                    ['availability', '2. Disponibilités & Jours sans cours'],
+                    ['substitutes', '3. Absences & Remplacements Automatiques'],
+                  ] as const
+                ).map(([subKey, subLabel]) => (
+                  <button
+                    key={subKey}
+                    onClick={() => setTeacherSubTab(subKey)}
+                    className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
+                      teacherSubTab === subKey
+                        ? 'bg-slate-900 text-white'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {subLabel}
+                  </button>
+                ))}
               </div>
 
-              <div className="flex flex-wrap items-center gap-3">
-                <button
-                  onClick={handleApplyAllDefaultTimetables}
-                  disabled={isSyncingDefaults}
-                  className="px-4 py-2.5 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
-                >
-                  <UserCheck className="w-4 h-4" />
-                  <span>
-                    {isSyncingDefaults
-                      ? 'Application en cours...'
-                      : `Appliquer par défaut aux ${teachers.length} enseignants`}
-                  </span>
-                </button>
-                <button
-                  onClick={() => handleDownloadLandscapeHtml('single_teacher')}
-                  className="px-3.5 py-2.5 text-xs font-medium text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  <span>Exporter Grille Professeur (PDF Paysage)</span>
-                </button>
-              </div>
+              <button
+                onClick={handleApplyAllDefaultTimetables}
+                disabled={isSyncingDefaults}
+                className="px-4 py-2 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+              >
+                <UserCheck className="w-4 h-4" />
+                <span>
+                  {isSyncingDefaults
+                    ? 'Synchronisation...'
+                    : `Appliquer par défaut aux ${teachers.length} enseignants`}
+                </span>
+              </button>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-              {/* Left: Teachers Directory Table */}
-              <div className="lg:col-span-5 bg-white border border-slate-200 rounded-lg overflow-hidden no-print">
-                <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-3">
-                  <div className="relative flex-1">
-                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            {/* SUB-TAB 1: DIRECTORY & WORKLOAD BALANCING */}
+            {teacherSubTab === 'directory' && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                <div
+                  className={`lg:col-span-5 border rounded-lg overflow-hidden no-print ${
+                    darkMode
+                      ? 'bg-slate-900 border-slate-800'
+                      : 'bg-white border-slate-200'
+                  }`}
+                >
+                  <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-3">
                     <input
                       type="text"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Filtrer un enseignant ou une matière..."
-                      className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:border-sky-600"
+                      placeholder="Filtrer enseignant, matière, section..."
+                      className="w-full px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900"
                     />
+                    <span className="text-xs font-mono text-slate-500 tabular-nums shrink-0">
+                      {filteredTeachers.length} profs
+                    </span>
                   </div>
-                  <span className="text-xs font-mono text-slate-500 tabular-nums shrink-0">
-                    {filteredTeachers.length} profs
-                  </span>
-                </div>
 
-                <div className="max-h-[600px] overflow-y-auto divide-y divide-slate-100">
-                  {filteredTeachers.map((t) => {
-                    const stats = buildTeacherTimetable(t.name, classes);
-                    const isSelected = selectedTeacher?.id === t.id;
-                    return (
-                      <div
-                        key={t.id}
-                        onClick={() => setSelectedTeacherId(t.id)}
-                        className={`px-4 py-3 cursor-pointer transition-colors flex items-center justify-between gap-3 ${
-                          isSelected ? 'bg-sky-50/90' : 'hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-slate-900 truncate">
-                              {t.name}
-                            </span>
-                            {t.defaultAssigned && (
-                              <span title="Emploi du temps par défaut affecté" className="inline-flex shrink-0">
-                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <div className="max-h-[580px] overflow-y-auto divide-y divide-slate-100">
+                    {filteredTeachers.map((t) => {
+                      const stats = buildTeacherTimetable(t.name, classes);
+                      const isSelected = selectedTeacher?.id === t.id;
+                      const isOverloaded =
+                        stats.totalPeriods > t.maxPeriodsPerWeek;
+                      const isUnderloaded = stats.totalPeriods < 8;
+
+                      return (
+                        <div
+                          key={t.id}
+                          onClick={() => setSelectedTeacherId(t.id)}
+                          className={`px-4 py-3 cursor-pointer transition-colors flex items-center justify-between gap-3 ${
+                            isSelected ? 'bg-sky-50/90 text-slate-950' : 'hover:bg-slate-50/60'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold truncate">
+                                {t.name}
                               </span>
-                            )}
+                              {t.defaultAssigned && (
+                                <span
+                                  title="Emploi du temps par défaut affecté"
+                                  className="inline-flex shrink-0"
+                                >
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-slate-500 truncate mt-0.5">
+                              {t.subjects.join(' · ')} · Section : {t.section}
+                            </div>
                           </div>
-                          <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                            {t.subjects.join(' · ')}
-                          </div>
-                          <div className="text-[11px] text-slate-400 truncate mt-0.5">
-                            Classes : {stats.classesTaught.join(', ') || 'Aucune'}
-                          </div>
-                        </div>
 
-                        <div className="text-right shrink-0">
-                          <div className="text-xs font-mono font-semibold text-slate-900 tabular-nums">
-                            {stats.totalPeriods} p/sem
-                          </div>
-                          <div className="text-[11px] text-slate-500 tabular-nums">
-                            {t.unavailableSlots.length > 0
-                              ? `${t.unavailableSlots.length} indisp.`
-                              : '100% dispo'}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Right: Selected Teacher Consolidated Timetable */}
-              <div className="lg:col-span-7 space-y-4">
-                {selectedTeacher && (
-                  <>
-                    <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 no-print">
-                      <div>
-                        <h2 className="text-lg font-bold text-slate-950">
-                          Emploi du Temps Individuel : {selectedTeacher.name}
-                        </h2>
-                        <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 mt-1">
-                          <span>Matières : {selectedTeacher.subjects.join(', ')}</span>
-                          <span aria-hidden="true">·</span>
-                          <span className="tabular-nums font-medium text-slate-900">
-                            Charge : {selectedTeacherSchedule.totalPeriods} périodes / semaine
-                          </span>
-                          <span aria-hidden="true">·</span>
-                          <span>
-                            Classes ({selectedTeacherSchedule.classesTaught.length}) :{' '}
-                            {selectedTeacherSchedule.classesTaught.join(', ')}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => setActiveTab('availability')}
-                          className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap shrink-0"
-                        >
-                          Gérer disponibilités ({selectedTeacher.unavailableSlots.length})
-                        </button>
-                        <button
-                          onClick={() => window.print()}
-                          className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                        >
-                          <Printer className="w-3.5 h-3.5" />
-                          <span>Imprimer PDF</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <LandscapeTimetableSheet
-                      title={`Prof. ${selectedTeacher.name}`}
-                      subtitle={`${SCHOOL_INFO.subtitle} — Matières : ${selectedTeacher.subjects.join(', ')}`}
-                      section="Primary"
-                      slots={selectedTeacherSchedule.slots}
-                      isTeacherView={true}
-                      unavailableSlotKeys={new Set(selectedTeacher.unavailableSlots)}
-                    />
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ===================================================================
-            TAB 3: DISPONIBILITÉS DES ENSEIGNANTS
-           =================================================================== */}
-        {activeTab === 'availability' && selectedTeacher && (
-          <div className="space-y-6 no-print">
-            <div className="bg-white border border-slate-200 rounded-lg p-5 flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <h1 className="text-xl font-bold text-slate-950">
-                  Gestion des Disponibilités & Contraintes Horaires
-                </h1>
-                <p className="text-xs text-slate-600 mt-1">
-                  Sélectionnez un enseignant et cliquez sur les créneaux pour basculer entre Disponible et Indisponible. Le moteur Gemini IA utilise ces contraintes pour éviter automatiquement tout conflit.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <label className="text-xs font-semibold text-slate-700">
-                  Enseignant :
-                </label>
-                <select
-                  value={selectedTeacher.id}
-                  onChange={(e) => setSelectedTeacherId(e.target.value)}
-                  className="px-3 py-2 text-xs font-medium bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-sky-600"
-                >
-                  {teachers.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name} ({t.subjects.join(', ')})
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="bg-white border border-slate-200 rounded-lg p-5">
-              <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
-                <div className="flex items-center gap-3 text-xs text-slate-600">
-                  <span className="font-bold text-slate-900 text-sm">
-                    {selectedTeacher.name}
-                  </span>
-                  <span aria-hidden="true">·</span>
-                  <span className="tabular-nums">
-                    Cours assignés : {selectedTeacherSchedule.totalPeriods} périodes/semaine
-                  </span>
-                  <span aria-hidden="true">·</span>
-                  <span className="tabular-nums font-medium text-amber-800">
-                    Créneaux indisponibles : {selectedTeacher.unavailableSlots.length}
-                  </span>
-                </div>
-
-                {selectedTeacher.unavailableSlots.length > 0 && (
-                  <button
-                    onClick={() =>
-                      saveTeacherToStore({
-                        ...selectedTeacher,
-                        unavailableSlots: [],
-                      })
-                    }
-                    className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-md"
-                  >
-                    Réinitialiser toutes les indisponibilités
-                  </button>
-                )}
-              </div>
-
-              <div className="overflow-x-auto">
-                <table className="w-full border-collapse border border-slate-200 table-fixed">
-                  <thead>
-                    <tr className="bg-slate-50 h-11">
-                      <th className="w-32 border border-slate-200 px-3 py-2 text-left text-xs font-semibold text-slate-700">
-                        Période
-                      </th>
-                      {DAYS_OF_WEEK.map((day) => (
-                        <th
-                          key={day}
-                          className="border border-slate-200 px-3 py-2 text-center text-xs font-semibold text-slate-900"
-                        >
-                          {day}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[1, 2, 3, 4, 5, 6, 7, 8].map((period) => (
-                      <tr key={period} className="h-16">
-                        <td className="border border-slate-200 bg-slate-50 px-3 py-2">
-                          <div className="text-xs font-bold text-slate-900 tabular-nums">
-                            Période {period}
-                          </div>
-                          <div className="text-[11px] text-slate-500 tabular-nums">
-                            {BELL_SCHEDULES.Primary.find(
-                              (b) => b.periodNumber === period
-                            )?.time || ''}
-                          </div>
-                        </td>
-                        {DAYS_OF_WEEK.map((day) => {
-                          const key = `${day}_${period}`;
-                          const isUnavail =
-                            selectedTeacher.unavailableSlots.includes(key);
-                          const assignedLesson = selectedTeacherSchedule.slots[key];
-                          const isConflict = isUnavail && Boolean(assignedLesson);
-
-                          return (
-                            <td
-                              key={key}
-                              onClick={() =>
-                                handleToggleTeacherUnavailable(day, period)
-                              }
-                              className={`border border-slate-200 p-2 cursor-pointer transition-colors ${
-                                isConflict
-                                  ? 'bg-red-50 hover:bg-red-100'
-                                  : isUnavail
-                                  ? 'bg-amber-50 hover:bg-amber-100'
-                                  : assignedLesson
-                                  ? 'bg-sky-50/60 hover:bg-sky-100/60'
-                                  : 'bg-white hover:bg-slate-50'
+                          <div className="text-right shrink-0">
+                            <div
+                              className={`text-xs font-mono font-semibold tabular-nums ${
+                                isOverloaded
+                                  ? 'text-red-600'
+                                  : isUnderloaded
+                                  ? 'text-amber-600'
+                                  : ''
                               }`}
                             >
-                              <div className="flex flex-col justify-between h-full">
-                                <div className="flex items-center justify-between">
+                              {stats.totalPeriods} / {t.maxPeriodsPerWeek}p
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {isOverloaded
+                                ? 'Surcharge'
+                                : isUnderloaded
+                                ? 'Temps partiel / Sous-charge'
+                                : 'Charge équilibrée'}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="lg:col-span-7 space-y-4">
+                  {selectedTeacher && (
+                    <>
+                      <div
+                        className={`border rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 no-print ${
+                          darkMode
+                            ? 'bg-slate-900 border-slate-800'
+                            : 'bg-white border-slate-200'
+                        }`}
+                      >
+                        <div>
+                          <h2 className="text-base font-bold">
+                            Grille Consolidée : {selectedTeacher.name}
+                          </h2>
+                          <p className="text-xs text-slate-500 mt-0.5 tabular-nums">
+                            {selectedTeacherSchedule.totalPeriods} périodes/semaine ·{' '}
+                            {selectedTeacherSchedule.classesTaught.length} classe(s) :{' '}
+                            {selectedTeacherSchedule.classesTaught.join(', ')}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-slate-600">
+                            Max p/sem :
+                          </label>
+                          <input
+                            type="number"
+                            min={4}
+                            max={40}
+                            value={selectedTeacher.maxPeriodsPerWeek}
+                            onChange={(e) =>
+                              saveTeacherToStore({
+                                ...selectedTeacher,
+                                maxPeriodsPerWeek:
+                                  Number(e.target.value) || 24,
+                              })
+                            }
+                            className="w-16 px-2 py-1 text-xs border border-slate-300 rounded font-mono tabular-nums text-slate-900 bg-white"
+                          />
+                          <button
+                            onClick={() =>
+                              handleDownloadLandscapeHtml('single_teacher')
+                            }
+                            className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-md flex items-center gap-1.5"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>PDF Paysage Prof</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <LandscapeTimetableSheet
+                        title={`Prof. ${selectedTeacher.name}`}
+                        subtitle={`${SCHOOL_INFO.subtitle} — Matières : ${selectedTeacher.subjects.join(
+                          ', '
+                        )}`}
+                        section="Primary"
+                        slots={selectedTeacherSchedule.slots}
+                        isTeacherView={true}
+                        unavailableSlotKeys={
+                          new Set(selectedTeacher.unavailableSlots)
+                        }
+                      />
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* SUB-TAB 2: AVAILABILITY MATRIX */}
+            {teacherSubTab === 'availability' && selectedTeacher && (
+              <div
+                className={`border rounded-lg p-5 space-y-4 no-print ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-base font-bold">
+                      Disponibilités & Horaires Autorisés : {selectedTeacher.name}
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Cliquez sur un créneau ou sur l'en-tête d'une journée entière pour définir un jour sans cours.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <select
+                      value={selectedTeacher.id}
+                      onChange={(e) => setSelectedTeacherId(e.target.value)}
+                      className="px-3 py-1.5 text-xs font-medium bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
+                    >
+                      {teachers.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} ({t.subjects.join(', ')})
+                        </option>
+                      ))}
+                    </select>
+                    {selectedTeacher.unavailableSlots.length > 0 && (
+                      <button
+                        onClick={() =>
+                          saveTeacherToStore({
+                            ...selectedTeacher,
+                            unavailableSlots: [],
+                          })
+                        }
+                        className="px-3 py-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-md"
+                      >
+                        Tout rendre disponible
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse border border-slate-200 table-fixed text-slate-900 bg-white">
+                    <thead>
+                      <tr className="bg-slate-50 h-11">
+                        <th className="w-32 border border-slate-200 px-3 py-2 text-left text-xs font-semibold">
+                          Période
+                        </th>
+                        {DAYS_OF_WEEK.map((day) => (
+                          <th
+                            key={day}
+                            className="border border-slate-200 px-3 py-2 text-center text-xs font-semibold"
+                          >
+                            <div>{day}</div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const dayKeys = [1, 2, 3, 4, 5, 6, 7, 8].map(
+                                  (p) => `${day}_${p}`
+                                );
+                                const allBlocked = dayKeys.every((k) =>
+                                  selectedTeacher.unavailableSlots.includes(k)
+                                );
+                                const next = allBlocked
+                                  ? selectedTeacher.unavailableSlots.filter(
+                                      (k) => !dayKeys.includes(k)
+                                    )
+                                  : Array.from(
+                                      new Set([
+                                        ...selectedTeacher.unavailableSlots,
+                                        ...dayKeys,
+                                      ])
+                                    );
+                                saveTeacherToStore({
+                                  ...selectedTeacher,
+                                  unavailableSlots: next,
+                                });
+                              }}
+                              className="text-[10px] font-medium text-sky-700 hover:underline mt-0.5"
+                            >
+                              Basculer journée entière
+                            </button>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((period) => (
+                        <tr key={period} className="h-14">
+                          <td className="border border-slate-200 bg-slate-50 px-3 py-1.5">
+                            <div className="text-xs font-bold tabular-nums">
+                              Période {period}
+                            </div>
+                            <div className="text-[11px] text-slate-500 tabular-nums">
+                              {BELL_SCHEDULES.Primary.find(
+                                (b) => b.periodNumber === period
+                              )?.time || ''}
+                            </div>
+                          </td>
+                          {DAYS_OF_WEEK.map((day) => {
+                            const key = `${day}_${period}`;
+                            const isUnavail =
+                              selectedTeacher.unavailableSlots.includes(key);
+                            const assignedLesson =
+                              selectedTeacherSchedule.slots[key];
+                            const isConflict =
+                              isUnavail && Boolean(assignedLesson);
+
+                            return (
+                              <td
+                                key={key}
+                                onClick={() =>
+                                  handleToggleTeacherUnavailable(day, period)
+                                }
+                                className={`border border-slate-200 p-2 cursor-pointer transition-colors ${
+                                  isConflict
+                                    ? 'bg-red-50 hover:bg-red-100'
+                                    : isUnavail
+                                    ? 'bg-amber-50 hover:bg-amber-100'
+                                    : assignedLesson
+                                    ? 'bg-sky-50/60 hover:bg-sky-100/60'
+                                    : 'bg-white hover:bg-slate-50'
+                                }`}
+                              >
+                                <div className="flex flex-col justify-between h-full">
                                   <span
                                     className={`text-[11px] font-semibold ${
                                       isConflict
@@ -1421,16 +2472,676 @@ export default function App() {
                                       ? 'Indisponible'
                                       : 'Disponible'}
                                   </span>
+                                  {assignedLesson && (
+                                    <div className="text-[11px] font-medium text-slate-800 truncate">
+                                      {assignedLesson.subject} ·{' '}
+                                      {assignedLesson.teacher}
+                                    </div>
+                                  )}
                                 </div>
-                                {assignedLesson && (
-                                  <div className="mt-1 text-[11px] font-medium text-slate-800 truncate">
-                                    {assignedLesson.subject} · {assignedLesson.teacher}
-                                  </div>
-                                )}
-                              </div>
-                            </td>
-                          );
-                        })}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* SUB-TAB 3: ABSENCES & AUTOMATIC SUBSTITUTE SEARCH (Point 12) */}
+            {teacherSubTab === 'substitutes' && (
+              <div
+                className={`border rounded-lg p-5 space-y-5 no-print ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div>
+                  <h2 className="text-base font-bold">
+                    Gestion des Absences & Recherche Automatique d'un Remplaçant Qualifié
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Sélectionnez l'enseignant absent et le créneau concerné. Le moteur identifie tous les professeurs libres à cette heure, qualifiés dans la même matière ou section, et sous leur plafond hebdomadaire.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 p-4 bg-slate-50 border border-slate-200 rounded-lg text-slate-900">
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">
+                      Enseignant absent
+                    </label>
+                    <select
+                      value={absentTeacherId}
+                      onChange={(e) => setAbsentTeacherId(e.target.value)}
+                      className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-md"
+                    >
+                      {teachers.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} ({t.subjects.join(', ')})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">
+                      Jour d'absence
+                    </label>
+                    <select
+                      value={absentDay}
+                      onChange={(e) =>
+                        setAbsentDay(e.target.value as DayOfWeek)
+                      }
+                      className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-md"
+                    >
+                      {DAYS_OF_WEEK.map((d) => (
+                        <option key={d} value={d}>
+                          {d}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold mb-1">
+                      Période concernée
+                    </label>
+                    <select
+                      value={absentPeriod}
+                      onChange={(e) => setAbsentPeriod(Number(e.target.value))}
+                      className="w-full px-3 py-2 text-xs bg-white border border-slate-300 rounded-md"
+                    >
+                      {[1, 2, 3, 4, 5, 6, 7, 8].map((p) => (
+                        <option key={p} value={p}>
+                          Période {p}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+
+                {/* Course affected banner */}
+                <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-950 flex items-center justify-between">
+                  <div>
+                    <span className="font-bold">Séance à remplacer : </span>
+                    {absentTeacherLessonAtSlot ? (
+                      <span>
+                        Cours de <strong>{absentTeacherLessonAtSlot.subject}</strong> en classe de{' '}
+                        <strong>{absentTeacherLessonAtSlot.teacher}</strong> ({absentDay} P{absentPeriod})
+                      </span>
+                    ) : (
+                      <span>
+                        {absentTeacherObj?.name} n'a pas de classe assignée sur {absentDay} P{absentPeriod} (remplacement préventif).
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Ranked Substitute Candidates */}
+                <div className="space-y-2">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                    Enseignants Remplaçants Disponibles & Qualifiés ({substituteCandidates.length})
+                  </h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {substituteCandidates.map((cand) => (
+                      <div
+                        key={cand.teacher.id}
+                        className="p-3.5 border border-slate-200 rounded-lg flex items-center justify-between gap-3 bg-white text-slate-900"
+                      >
+                        <div>
+                          <div className="text-xs font-bold">
+                            {cand.teacher.name}
+                          </div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">
+                            Matières : {cand.teacher.subjects.join(', ')} · Charge :{' '}
+                            <span className="font-mono tabular-nums">
+                              {cand.currentWeeklyLoad}/{cand.teacher.maxPeriodsPerWeek}p
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-emerald-700 font-medium mt-0.5">
+                            {cand.teachesSameSubject
+                              ? 'Même spécialité matière'
+                              : 'Disponible sur ce créneau'}{' '}
+                            · Score compatibilité : {cand.score}/100
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() =>
+                            handleAssignSubstitute(cand.teacher.name)
+                          }
+                          className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-md whitespace-nowrap shrink-0"
+                        >
+                          Affecter & Notifier
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ===================================================================
+            MODULE 3: MOTEUR DE CONTRAINTES (CP-SAT) + MULTI-PROPOSITIONS + ASSISTANT IA
+           =================================================================== */}
+        {activeTab === 'ai_csp' && (
+          <div className="space-y-6 no-print">
+            {/* Top Row: Conversational AI Assistant + Constraint Engine Verification (Point 5) */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              <div
+                className={`lg:col-span-7 border rounded-lg p-5 space-y-4 ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div>
+                  <h2 className="text-lg font-bold flex items-center gap-2">
+                    <MessageSquare className="w-5 h-5 text-sky-600" />
+                    <span>
+                      Assistant IA Conversationnel & Vérificateur de Contraintes
+                    </span>
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    Formulez vos instructions en langage naturel. Chaque modification proposée par Gemini AI est obligatoirement contrôlée par le moteur de contraintes strictes avant validation, sans jamais supprimer de séance obligatoire.
+                  </p>
+                </div>
+
+                {/* Preset Natural Language Prompts */}
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    'Déplace les cours de sciences de l’après-midi vers le matin pour PEI2',
+                    'Évite les séances répétitives de Maths le même jour pour G1 Girls',
+                    'Analyse les conflits et propose la meilleure permutation pour KG3',
+                  ].map((sample) => (
+                    <button
+                      key={sample}
+                      type="button"
+                      onClick={() => setChatInput(sample)}
+                      className="px-2.5 py-1 text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition-colors"
+                    >
+                      « {sample} »
+                    </button>
+                  ))}
+                </div>
+
+                <form onSubmit={handleAskConversationalAi} className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-slate-600">
+                      Classe active :
+                    </span>
+                    <select
+                      value={selectedClass.id}
+                      onChange={(e) => setSelectedClassId(e.target.value)}
+                      className="px-2.5 py-1 text-xs border border-slate-300 rounded bg-slate-50 text-slate-900"
+                    >
+                      {classes.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Ex: Déplace les cours de sciences du matin vers l’après-midi pour PEI2..."
+                      className="flex-1 px-3.5 py-2 text-xs border border-slate-300 rounded-lg text-slate-900 bg-white focus:outline-none focus:border-sky-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={isChatLoading}
+                      className="px-4 py-2 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 disabled:opacity-50 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>
+                        {isChatLoading ? 'Vérification...' : 'Analyser & Simuler'}
+                      </span>
+                    </button>
+                  </div>
+                </form>
+
+                {/* Pending AI Proposal with Constraint Engine Verification Gate */}
+                {pendingAiProposal && (
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-3 text-slate-900">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold">
+                        Proposition de l'Assistant IA & Contrôle Moteur CP-SAT
+                      </span>
+                      <span
+                        className={`text-xs font-semibold ${
+                          pendingAiProposal.engineValid
+                            ? 'text-emerald-700'
+                            : 'text-amber-700'
+                        }`}
+                      >
+                        {pendingAiProposal.engineValid
+                          ? 'Vérifié : 0 violation stricte'
+                          : `${pendingAiProposal.engineViolations.length} alerte(s) contrainte`}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-slate-700 leading-relaxed">
+                      {pendingAiProposal.reply}
+                    </p>
+
+                    {pendingAiProposal.warning && (
+                      <div className="p-2.5 bg-amber-50 border border-amber-200 rounded text-xs text-amber-900">
+                        <strong>Note de compatibilité :</strong>{' '}
+                        {pendingAiProposal.warning}
+                      </div>
+                    )}
+
+                    {pendingAiProposal.swaps.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="text-[11px] font-semibold text-slate-600">
+                          Permutations simulées (conservation 100% du volume horaire) :
+                        </div>
+                        {pendingAiProposal.swaps.map((sw, idx) => (
+                          <div
+                            key={idx}
+                            className="p-2 bg-white border border-slate-200 rounded text-xs flex items-center justify-between"
+                          >
+                            <span>
+                              <strong>{sw.className}</strong> : {sw.fromKey} (
+                              {sw.fromSlot?.subject || 'Libre'}) ↔ {sw.toKey} (
+                              {sw.toSlot?.subject || 'Libre'})
+                            </span>
+                            <span className="text-[11px] text-slate-500">
+                              {sw.reason}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+                      <button
+                        type="button"
+                        onClick={() => setPendingAiProposal(null)}
+                        className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-300 rounded-md"
+                      >
+                        Refuser / Annuler
+                      </button>
+                      {pendingAiProposal.swaps.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleConfirmPendingAiProposal}
+                          className="px-4 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded-md flex items-center gap-1.5"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Accepter & Valider les modifications</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Right Column: Multi-Proposal Generator & Comparator (Points 4 & 17) */}
+              <div
+                className={`lg:col-span-5 border rounded-lg p-5 space-y-4 ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-lg font-bold">
+                      Générateur Multi-Propositions Classées
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Comparez 3 propositions d'emplois du temps selon leur score pédagogique et technique.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleGenerateMultiProposals('all')}
+                    disabled={isGeneratingProposals}
+                    className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg whitespace-nowrap shrink-0"
+                  >
+                    {isGeneratingProposals
+                      ? 'Calcul CP-SAT...'
+                      : 'Générer 3 Propositions'}
+                  </button>
+                </div>
+
+                {generatedProposals.length === 0 ? (
+                  <div className="p-6 text-center bg-slate-50 border border-slate-200 rounded-lg text-slate-600 text-xs">
+                    Cliquez sur <strong>« Générer 3 Propositions »</strong> pour lancer le solveur de contraintes et comparer les solutions A, B et C.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {generatedProposals.map((prop) => (
+                      <div
+                        key={prop.id}
+                        className="p-3.5 border border-slate-200 rounded-lg bg-slate-50 text-slate-900 space-y-2"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold">{prop.name}</span>
+                          <span className="text-xs font-mono font-bold text-emerald-700 tabular-nums">
+                            Score : {prop.quality.globalScore}/100
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600">
+                          {prop.description}
+                        </p>
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-700 pt-1">
+                          <span className="tabular-nums">
+                            Matières matin : {prop.quality.morningCoreRatio}% · Permutations : {prop.swapsPerformed}
+                          </span>
+                          <button
+                            onClick={() => handleApplyProposal(prop)}
+                            className="px-3 py-1 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 rounded"
+                          >
+                            Appliquer cette proposition
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Bottom Row: Advanced Constraints Manager (Strict vs Soft) + Live Conflict Radar */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Constraints Governance Table (Point 6) */}
+              <div
+                className={`lg:col-span-7 border rounded-lg p-5 space-y-4 ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div>
+                  <h2 className="text-base font-bold">
+                    Gestion Avancée des Contraintes (Strictes & Souples)
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Les contraintes strictes (HC) ne sont jamais violées par le solveur. Les contraintes souples (SC) sont pondérées par niveau de priorité.
+                  </p>
+                </div>
+
+                <div className="divide-y divide-slate-100">
+                  {constraints.map((rule) => (
+                    <div
+                      key={rule.id}
+                      className="py-3 flex items-center justify-between gap-4"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="font-mono font-bold text-slate-500">
+                            {rule.code}
+                          </span>
+                          <span className="font-bold">{rule.title}</span>
+                          <span className="text-slate-400" aria-hidden="true">
+                            ·
+                          </span>
+                          <span
+                            className={`text-[11px] font-semibold ${
+                              rule.category === 'strict'
+                                ? 'text-red-700'
+                                : 'text-sky-700'
+                            }`}
+                          >
+                            {rule.category === 'strict'
+                              ? 'Stricte (Obligatoire)'
+                              : `Souple (Priorité ${rule.priority}/10)`}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          {rule.description}
+                        </p>
+                      </div>
+
+                      <input
+                        type="checkbox"
+                        checked={rule.enabled}
+                        disabled={rule.category === 'strict'}
+                        onChange={() =>
+                          setConstraints((prev) =>
+                            prev.map((r) =>
+                              r.id === rule.id
+                                ? { ...r, enabled: !r.enabled }
+                                : r
+                            )
+                          )
+                        }
+                        className="h-4 w-4 accent-sky-700 shrink-0"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Conflict Radar */}
+              <div
+                className={`lg:col-span-5 border rounded-lg p-5 space-y-4 ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-bold">
+                    Radar des Conflits & Impossibilités
+                  </h2>
+                  <span className="text-xs font-mono font-bold tabular-nums">
+                    {conflicts.length} détecté(s)
+                  </span>
+                </div>
+
+                {conflicts.length === 0 ? (
+                  <div className="p-6 text-center bg-slate-50 border border-slate-200 rounded-lg text-slate-900">
+                    <CheckCircle2 className="w-7 h-7 text-emerald-600 mx-auto mb-2" />
+                    <div className="text-xs font-bold">
+                      Aucune contrainte stricte violée
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Les 35 classes respectent les disponibilités et l'unicité des enseignants.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
+                    {conflicts.map((conf) => (
+                      <div
+                        key={conf.id}
+                        className="p-3 bg-slate-50 border border-slate-200 rounded-lg flex items-center justify-between gap-3 text-slate-900"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="text-xs font-bold">
+                            {conf.teacher} · {conf.day} P{conf.period}
+                          </div>
+                          <p className="text-[11px] text-slate-600">
+                            {conf.description}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleResolveConflictWithAi(conf)}
+                          disabled={resolvingConflictId === conf.id}
+                          className="px-2.5 py-1 text-xs font-semibold text-white bg-slate-900 rounded shrink-0"
+                        >
+                          {resolvingConflictId === conf.id
+                            ? '...'
+                            : 'Corriger IA'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ===================================================================
+            MODULE 4: GESTION DES SALLES, LABORATOIRES, MATIÈRES & GROUPES (Points 3, 9, 10)
+           =================================================================== */}
+        {activeTab === 'resources' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start no-print">
+            {/* Rooms & Labs Management */}
+            <div
+              className={`lg:col-span-6 border rounded-lg p-5 space-y-4 ${
+                darkMode
+                  ? 'bg-slate-900 border-slate-800'
+                  : 'bg-white border-slate-200'
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-base font-bold">
+                    Salles de Classe, Laboratoires, Bibliothèques & Terrains P.E
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Gérez la capacité, les équipements et l'état de disponibilité de chaque espace.
+                  </p>
+                </div>
+                <span className="text-xs font-mono text-slate-500 tabular-nums">
+                  {rooms.length} salles
+                </span>
+              </div>
+
+              <div className="divide-y divide-slate-100 max-h-[520px] overflow-y-auto pr-1">
+                {rooms.map((room) => (
+                  <div
+                    key={room.id}
+                    className="py-3 flex items-center justify-between gap-3"
+                  >
+                    <div>
+                      <div className="text-xs font-bold">{room.name}</div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        {room.campus} · Capacité :{' '}
+                        <span className="font-mono tabular-nums">
+                          {room.capacity} places
+                        </span>{' '}
+                        · {room.equipment.join(', ')}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => {
+                          setSelectedRoomId(room.id);
+                          setGridViewMode('room');
+                          setActiveTab('editor');
+                        }}
+                        className="px-2.5 py-1 text-xs font-medium text-sky-700 bg-sky-50 rounded hover:bg-sky-100"
+                      >
+                        Voir planning
+                      </button>
+                      <button
+                        onClick={() =>
+                          setRooms((prev) =>
+                            prev.map((r) =>
+                              r.id === room.id
+                                ? { ...r, isAvailable: !r.isAvailable }
+                                : r
+                            )
+                          )
+                        }
+                        className={`px-2.5 py-1 text-xs font-medium rounded ${
+                          room.isAvailable
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-red-50 text-red-700'
+                        }`}
+                      >
+                        {room.isAvailable ? 'Active' : 'En maintenance'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Subjects, Coefficients & Durations Management */}
+            <div
+              className={`lg:col-span-6 border rounded-lg p-5 space-y-4 ${
+                darkMode
+                  ? 'bg-slate-900 border-slate-800'
+                  : 'bg-white border-slate-200'
+              }`}
+            >
+              <div>
+                <h2 className="text-base font-bold">
+                  Matières, Coefficients Horaires, Durées & Séances Spécialisées
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Configurez la durée (30, 40, 45, 50 ou 60 min), la priorité du matin et le type de salle requis.
+                </p>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500">
+                      <th className="py-2 pr-2">Matière</th>
+                      <th className="py-2 px-2">Durée</th>
+                      <th className="py-2 px-2">Type</th>
+                      <th className="py-2 px-2">Matin (P1-P4)</th>
+                      <th className="py-2 pl-2 text-right">Coeff</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {subjectConfigs.map((sub) => (
+                      <tr key={sub.id}>
+                        <td className="py-2.5 pr-2 font-bold">{sub.name}</td>
+                        <td className="py-2.5 px-2">
+                          <select
+                            value={sub.durationMinutes}
+                            onChange={(e) =>
+                              setSubjectConfigs((prev) =>
+                                prev.map((s) =>
+                                  s.id === sub.id
+                                    ? {
+                                        ...s,
+                                        durationMinutes: Number(
+                                          e.target.value
+                                        ) as SubjectConfig['durationMinutes'],
+                                      }
+                                    : s
+                                )
+                              )
+                            }
+                            className="px-2 py-1 border border-slate-200 rounded bg-slate-50 text-slate-900 font-mono tabular-nums"
+                          >
+                            {[30, 40, 45, 50, 60].map((m) => (
+                              <option key={m} value={m}>
+                                {m} min
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-2.5 px-2 text-slate-500 capitalize">
+                          {sub.sessionType}
+                        </td>
+                        <td className="py-2.5 px-2">
+                          <input
+                            type="checkbox"
+                            checked={sub.preferMorning}
+                            onChange={() =>
+                              setSubjectConfigs((prev) =>
+                                prev.map((s) =>
+                                  s.id === sub.id
+                                    ? { ...s, preferMorning: !s.preferMorning }
+                                    : s
+                                )
+                              )
+                            }
+                            className="accent-sky-700"
+                          />
+                        </td>
+                        <td className="py-2.5 pl-2 text-right font-mono tabular-nums font-semibold">
+                          {sub.weight}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1441,306 +3152,285 @@ export default function App() {
         )}
 
         {/* ===================================================================
-            TAB 4: PLANIFICATEUR AUTOMATIQUE GEMINI IA & RÉSOLVEUR DE CONFLITS
+            MODULE 5: RAPPORTS, STATISTIQUES, IMPORT EXCEL/CSV & IMPRESSION PDF
            =================================================================== */}
-        {activeTab === 'ai_optimizer' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start no-print">
-            {/* Left Column: Gemini AI Class Generator & Optimizer */}
-            <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-5 space-y-4">
-              <div>
-                <h2 className="text-lg font-bold text-slate-950 flex items-center gap-2">
-                  <Sparkles className="w-5 h-5 text-sky-700" />
-                  <span>Générateur & Optimiseur IA Gemini</span>
-                </h2>
-                <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                  Automatisez la planification des cours selon les disponibilités des enseignants tout en minimisant les conflits d'horaire et la fatigue pédagogique.
-                </p>
-              </div>
-
-              <div className="space-y-3 pt-2">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Classe à planifier / optimiser
-                  </label>
-                  <select
-                    value={selectedClass.id}
-                    onChange={(e) => setSelectedClassId(e.target.value)}
-                    className="w-full px-3 py-2 text-xs font-medium bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-sky-600"
-                  >
-                    {classes.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} — {SECTION_LABELS[c.section]}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Directives pédagogiques & contraintes pour Gemini IA
-                  </label>
-                  <textarea
-                    rows={4}
-                    value={aiCustomPrompt}
-                    onChange={(e) => setAiCustomPrompt(e.target.value)}
-                    className="w-full p-3 text-xs bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:border-sky-600 leading-relaxed"
-                    placeholder="Ex: Répartir les séances de Maths le matin, respecter les indisponibilités de Rayan et Walaa..."
-                  />
-                </div>
-
-                <button
-                  onClick={handleRunGeminiOptimizeClass}
-                  disabled={isAiRunning}
-                  className="w-full py-2.5 px-4 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 disabled:opacity-50 rounded-lg transition-colors flex items-center justify-center gap-2"
-                >
-                  {isAiRunning ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Calcul de l'emploi du temps optimal par Gemini IA...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-4 h-4" />
-                      <span>
-                        Lancer l'optimisation IA sur {selectedClass.name}
-                      </span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {aiResultSummary && (
-                <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-slate-900">
-                      Rapport d'optimisation Gemini AI
-                    </span>
-                    {aiResultSummary.pedagogicalScore !== undefined && (
-                      <span className="text-xs font-mono font-semibold text-emerald-700 tabular-nums">
-                        Équilibre : {aiResultSummary.pedagogicalScore}/100
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-xs text-slate-700 leading-relaxed">
-                    {aiResultSummary.summary}
-                  </p>
-                  <button
-                    onClick={() => setActiveTab('classes')}
-                    className="text-xs font-semibold text-sky-700 hover:underline pt-1 inline-block"
-                  >
-                    Voir la grille mise à jour de {selectedClass.name} →
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Right Column: Live Conflict Radar & One-Click AI Resolution */}
-            <div className="lg:col-span-6 bg-white border border-slate-200 rounded-lg p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-950">
-                    Radar de Conflits & Co-enseignements
-                  </h2>
-                  <p className="text-xs text-slate-600 mt-0.5">
-                    Analyse croisée en temps réel des {classes.length} classes et des indisponibilités déclarées.
-                  </p>
-                </div>
-                <span className="text-xs font-mono font-bold text-slate-900 tabular-nums">
-                  {conflicts.length} détecté(s)
-                </span>
-              </div>
-
-              {conflicts.length === 0 ? (
-                <div className="p-8 text-center bg-slate-50 border border-slate-200 rounded-lg">
-                  <CheckCircle2 className="w-8 h-8 text-emerald-600 mx-auto mb-2" />
-                  <div className="text-sm font-semibold text-slate-900">
-                    Aucun conflit d'horaire détecté
-                  </div>
-                  <p className="text-xs text-slate-500 mt-1">
-                    Toutes les classes et disponibilités enseignants sont parfaitement alignées.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-2.5 max-h-[500px] overflow-y-auto pr-1">
-                  {conflicts.map((conf) => (
-                    <div
-                      key={conf.id}
-                      className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                    >
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2 text-xs">
-                          <AlertTriangle
-                            className={`w-3.5 h-3.5 shrink-0 ${
-                              conf.severity === 'critical'
-                                ? 'text-red-600'
-                                : 'text-amber-600'
-                            }`}
-                          />
-                          <span className="font-bold text-slate-900">
-                            {conf.teacher}
-                          </span>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-mono text-slate-600 tabular-nums">
-                            {conf.day} P{conf.period}
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-600 leading-relaxed">
-                          {conf.description}
-                        </p>
-                      </div>
-
-                      <button
-                        onClick={() => handleResolveConflictWithAi(conf)}
-                        disabled={resolvingConflictId === conf.id}
-                        className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50 rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                      >
-                        <Sparkles className="w-3.5 h-3.5" />
-                        <span>
-                          {resolvingConflictId === conf.id
-                            ? 'Résolution...'
-                            : 'Résoudre IA'}
-                        </span>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* ===================================================================
-            TAB 5: IMPRESSION PAYSAGE HTML / PDF & EXPORT BASE DE DONNÉES
-           =================================================================== */}
-        {activeTab === 'print_export' && (
+        {activeTab === 'reports_export' && (
           <div className="space-y-6">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 no-print">
-              {/* Card 1: Landscape HTML & PDF Print Center */}
-              <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+            {/* KPI Summary Row (Point 13) */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 no-print">
+              <div
+                className={`p-4 border rounded-lg ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="text-xs text-slate-500">
+                  Qualité Globale de l'Emploi du Temps
+                </div>
+                <div className="text-2xl font-bold font-mono tabular-nums mt-1 text-emerald-600">
+                  {qualityReport.globalScore} / 100
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  Calculé par le moteur CP-SAT
+                </div>
+              </div>
+
+              <div
+                className={`p-4 border rounded-lg ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="text-xs text-slate-500">
+                  Matières Principales le Matin (P1–P4)
+                </div>
+                <div className="text-2xl font-bold font-mono tabular-nums mt-1 text-sky-600">
+                  {qualityReport.morningCoreRatio}%
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  Maths, Français, English, Sciences
+                </div>
+              </div>
+
+              <div
+                className={`p-4 border rounded-lg ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="text-xs text-slate-500">
+                  Taux d'Occupation des Salles & Labs
+                </div>
+                <div className="text-2xl font-bold font-mono tabular-nums mt-1">
+                  {qualityReport.roomUtilizationRate}%
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  Sur les {rooms.length} espaces configurés
+                </div>
+              </div>
+
+              <div
+                className={`p-4 border rounded-lg ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="text-xs text-slate-500">
+                  Année Scolaire & Duplication
+                </div>
+                <div className="flex items-center justify-between mt-1">
+                  <span className="text-xl font-bold font-mono tabular-nums">
+                    {schoolYear}
+                  </span>
+                  <button
+                    onClick={handleDuplicateSchoolYear}
+                    className="px-2.5 py-1 text-[11px] font-semibold bg-slate-900 text-white rounded flex items-center gap-1"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Dupliquer</span>
+                  </button>
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  Conservation des données utiles
+                </div>
+              </div>
+            </div>
+
+            {/* Row 2: Export Center (PDF Paysage, Excel CSV, iCalendar .ics, MySQL, MongoDB) + Excel Import Validator */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 no-print">
+              {/* Left: Impression & Multi-Format Export */}
+              <div
+                className={`lg:col-span-6 border rounded-lg p-5 space-y-4 ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
                 <div>
-                  <h2 className="text-lg font-bold text-slate-950">
-                    Impression & Export PDF Format Paysage (aSc Horaires)
+                  <h2 className="text-base font-bold">
+                    Centre d'Impression PDF Paysage, Excel, Calendrier iCal & Cloud DB
                   </h2>
-                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                    Générez des emplois du temps en orientation paysage A4 haute lisibilité fidèles au modèle officiel Al-Kawthar International Schools.
+                  <p className="text-xs text-slate-500 mt-1">
+                    Exportez les emplois du temps aux formats muraux A4 paysage, tableurs Excel/CSV, calendriers numériques (.ics) et bases de données.
                   </p>
                 </div>
 
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    onClick={() => setPrintScope('current_class')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                      printScope === 'current_class'
-                        ? 'bg-slate-900 text-white'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    Classe sélectionnée ({selectedClass.name})
-                  </button>
-                  <button
-                    onClick={() => setPrintScope('current_teacher')}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                      printScope === 'current_teacher'
-                        ? 'bg-slate-900 text-white'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    Enseignant sélectionné ({selectedTeacher?.name})
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                   <button
                     onClick={() => window.print()}
-                    className="px-3.5 py-2.5 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 rounded-lg flex items-center justify-center gap-1.5"
+                    className="px-3.5 py-2.5 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 rounded-lg flex items-center justify-center gap-2"
                   >
                     <Printer className="w-4 h-4" />
-                    <span>Imprimer en PDF Paysage</span>
+                    <span>Imprimer PDF Paysage (Actif)</span>
                   </button>
-                  <button
-                    onClick={() =>
-                      handleDownloadLandscapeHtml(
-                        printScope === 'current_teacher'
-                          ? 'single_teacher'
-                          : 'single_class'
-                      )
-                    }
-                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-1.5"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Télécharger Fiche HTML</span>
-                  </button>
+
                   <button
                     onClick={() => handleDownloadLandscapeHtml('all_classes')}
-                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-1.5"
+                    className="px-3.5 py-2.5 text-xs font-semibold text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2"
                   >
                     <FileText className="w-4 h-4" />
-                    <span>Pack 35 Classes (PDF HTML)</span>
+                    <span>Pack 35 Classes (HTML/PDF)</span>
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      handleDownloadFile(
+                        generateExcelCsvExport(classes),
+                        `AlKawthar_Emplois_du_Temps_${schoolYear}.csv`,
+                        'text/csv'
+                      )
+                    }
+                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    <span>Exporter vers Excel (.CSV)</span>
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      handleDownloadFile(
+                        generateICalendarExport(
+                          selectedClass.name,
+                          selectedClass.slots
+                        ),
+                        `Calendrier_${selectedClass.name.replace(
+                          /\s+/g,
+                          '_'
+                        )}.ics`,
+                        'text/calendar'
+                      )
+                    }
+                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <Calendar className="w-4 h-4" />
+                    <span>Exporter Calendrier (.ICS)</span>
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      handleDownloadFile(
+                        generateMySqlDump(classes, teachers),
+                        'alkawthar_mysql_dump.sql',
+                        'application/sql'
+                      )
+                    }
+                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <Database className="w-4 h-4" />
+                    <span>Export SQL Relationnel (.SQL)</span>
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      handleDownloadFile(
+                        generateMongoAtlasExport(classes, teachers),
+                        'alkawthar_mongodb_atlas.json',
+                        'application/json'
+                      )
+                    }
+                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span>Sauvegarde JSON / Atlas</span>
                   </button>
                 </div>
               </div>
 
-              {/* Card 2: Persistent Database Export (MySQL & MongoDB Atlas & Vercel) */}
-              <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-950">
-                    Persistance Cloud, Export MySQL & MongoDB Atlas
-                  </h2>
-                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                    Vos données sont persistées en temps réel. Vous pouvez également exporter à tout moment la base complète vers MySQL ou MongoDB Atlas pour votre déploiement externe (ex. Vercel).
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+              {/* Right: Smart Excel / CSV Importer & Validator (Point 11) */}
+              <div
+                className={`lg:col-span-6 border rounded-lg p-5 space-y-4 ${
+                  darkMode
+                    ? 'bg-slate-900 border-slate-800'
+                    : 'bg-white border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-base font-bold">
+                      Importation & Validation Intelligente Excel / CSV
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Détection automatique des colonnes, doublons, matières sans enseignant et aperçu avant enregistrement.
+                    </p>
+                  </div>
                   <button
-                    onClick={() => handleDownloadDatabaseExport('mysql')}
-                    className="p-3 text-left bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors flex items-center justify-between"
+                    type="button"
+                    onClick={() => {
+                      const sample =
+                        'Classe;Jour;Periode;Matiere;Enseignant\nPre-KG;Dimanche;1;English;Fareen - Najah PreKG\nKG1;Lundi;2;Montessori;Fatimah / Nour / Quodsiya';
+                      setCsvImportText(sample);
+                      setCsvValidationResult(
+                        parseAndValidateImportedCsv(sample)
+                      );
+                    }}
+                    className="text-xs text-sky-700 hover:underline font-medium shrink-0"
                   >
-                    <div>
-                      <div className="text-xs font-bold text-slate-900">
-                        Exporter Base MySQL (.sql)
-                      </div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">
-                        Tables relationnelles + 35 classes + 68 profs
-                      </div>
-                    </div>
-                    <Database className="w-4 h-4 text-slate-600 shrink-0" />
-                  </button>
-
-                  <button
-                    onClick={() => handleDownloadDatabaseExport('mongodb')}
-                    className="p-3 text-left bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="text-xs font-bold text-slate-900">
-                        Exporter MongoDB Atlas (.json)
-                      </div>
-                      <div className="text-[11px] text-slate-500 mt-0.5">
-                        Collections JSON prêtes pour Atlas / Vercel
-                      </div>
-                    </div>
-                    <Download className="w-4 h-4 text-slate-600 shrink-0" />
+                    Charger exemple CSV
                   </button>
                 </div>
+
+                <textarea
+                  rows={3}
+                  value={csvImportText}
+                  onChange={(e) => {
+                    setCsvImportText(e.target.value);
+                    if (e.target.value.trim()) {
+                      setCsvValidationResult(
+                        parseAndValidateImportedCsv(e.target.value)
+                      );
+                    } else {
+                      setCsvValidationResult(null);
+                    }
+                  }}
+                  placeholder="Collez ici vos lignes Excel ou CSV (Classe;Jour;Periode;Matiere;Enseignant)..."
+                  className="w-full p-2.5 text-xs font-mono border border-slate-300 rounded-lg text-slate-900 bg-slate-50"
+                />
+
+                {csvValidationResult && (
+                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-900 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold">
+                        Aperçu : {csvValidationResult.rows.length} séance(s) valide(s)
+                      </span>
+                      <span className="font-mono text-[11px] tabular-nums">
+                        {csvValidationResult.issues.length} anomalie(s)
+                      </span>
+                    </div>
+                    {csvValidationResult.issues.slice(0, 3).map((iss, idx) => (
+                      <div
+                        key={idx}
+                        className={`text-[11px] ${
+                          iss.severity === 'error'
+                            ? 'text-red-600'
+                            : 'text-amber-700'
+                        }`}
+                      >
+                        • {iss.message}
+                      </div>
+                    ))}
+                    {csvValidationResult.rows.length > 0 && (
+                      <button
+                        onClick={handleApplyValidatedCsvImport}
+                        className="px-3 py-1.5 text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 rounded"
+                      >
+                        Enregistrer les {csvValidationResult.rows.length} séances validées
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* Live Printable Landscape Preview */}
-            {printScope === 'current_teacher' && selectedTeacher ? (
-              <LandscapeTimetableSheet
-                title={`Prof. ${selectedTeacher.name}`}
-                subtitle={`${SCHOOL_INFO.subtitle} — Matières : ${selectedTeacher.subjects.join(', ')}`}
-                section="Primary"
-                slots={selectedTeacherSchedule.slots}
-                isTeacherView={true}
-              />
-            ) : (
-              <LandscapeTimetableSheet
-                title={selectedClass.name}
-                section={selectedClass.section}
-                slots={selectedClass.slots}
-              />
-            )}
+            {/* Printable Preview */}
+            <LandscapeTimetableSheet
+              title={selectedClass.name}
+              section={selectedClass.section}
+              slots={selectedClass.slots}
+            />
           </div>
         )}
       </main>
@@ -1750,11 +3440,11 @@ export default function App() {
          ===================================================================== */}
       {editingCell && (
         <div className="fixed inset-0 z-50 bg-slate-950/50 flex items-center justify-center p-4 no-print">
-          <div className="bg-white border border-slate-200 rounded-lg max-w-md w-full p-5 space-y-4 shadow-xl">
+          <div className="bg-white border border-slate-200 rounded-lg max-w-md w-full p-5 space-y-4 shadow-xl text-slate-900">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-950">
-                  Modifier le créneau — {selectedClass.name}
+                  Modifier la séance — {selectedClass.name}
                 </h3>
                 <p className="text-xs text-slate-500 tabular-nums">
                   {editingCell.day} · Période {editingCell.period}
@@ -1805,9 +3495,29 @@ export default function App() {
                 </datalist>
               </div>
 
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Salle ou Laboratoire affecté
+                </label>
+                <input
+                  type="text"
+                  list="alkawthar-rooms-list"
+                  value={editingCell.room}
+                  onChange={(e) =>
+                    setEditingCell({ ...editingCell, room: e.target.value })
+                  }
+                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-md focus:outline-none focus:border-sky-600"
+                />
+                <datalist id="alkawthar-rooms-list">
+                  {rooms.map((r) => (
+                    <option key={r.id} value={r.name} />
+                  ))}
+                </datalist>
+              </div>
+
               <div className="pt-2 border-t border-slate-100">
                 <span className="block text-[11px] font-semibold text-slate-500 mb-2">
-                  Optionnel : Demi-groupe / Co-enseignement (ex: Easy Arabic)
+                  Optionnel : Sous-groupe / Co-enseignement (ex: Easy Arabic)
                 </span>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -1886,18 +3596,18 @@ export default function App() {
       )}
 
       {/* =====================================================================
-          SLIDE-OVER DRAWER: REAL-TIME NOTIFICATIONS
+          SLIDE-OVER DRAWER: REAL-TIME NOTIFICATIONS & AUDIT TRAIL (Point 15)
          ===================================================================== */}
       {showNotifDrawer && (
         <div className="fixed inset-0 z-50 bg-slate-950/40 flex justify-end no-print">
-          <div className="bg-white w-full max-w-md h-full flex flex-col border-l border-slate-200 shadow-xl">
+          <div className="bg-white w-full max-w-md h-full flex flex-col border-l border-slate-200 shadow-xl text-slate-900">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-950">
-                  Journal des Notifications en Temps Réel
+                  Notifications Temps Réel & Journal d'Audit Direction
                 </h3>
                 <p className="text-[11px] text-slate-500">
-                  Synchronisation WebSocket & Firestore instantanée
+                  Traçabilité complète des modifications et validations
                 </p>
               </div>
               <button
@@ -1908,41 +3618,82 @@ export default function App() {
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto divide-y divide-slate-100 p-4 space-y-3">
-              {notifications.map((n) => (
-                <div key={n.id} className="pt-3 first:pt-0">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-slate-900">{n.title}</span>
-                    <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                      {n.timestampMs
-                        ? new Date(n.timestampMs).toLocaleTimeString('fr-FR', {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })
-                        : 'En direct'}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                    {n.message}
-                  </p>
-                  <div className="text-[11px] text-slate-400 mt-1">
-                    Cible : {n.targetTeacher === 'all' ? 'Tous les enseignants' : n.targetTeacher}
-                  </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-5">
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                  Notifications en direct ({notifications.length})
+                </h4>
+                <div className="divide-y divide-slate-100 space-y-2.5">
+                  {notifications.slice(0, 10).map((n) => (
+                    <div key={n.id} className="pt-2.5 first:pt-0">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold text-slate-900">
+                          {n.title}
+                        </span>
+                        <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                          {n.timestampMs
+                            ? new Date(n.timestampMs).toLocaleTimeString(
+                                'fr-FR',
+                                {
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                }
+                              )
+                            : 'En direct'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-600 mt-0.5 leading-relaxed">
+                        {n.message}
+                      </p>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              </div>
+
+              <div className="border-t border-slate-200 pt-4">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2">
+                  Journal d'Audit Détaillé ({auditLogs.length})
+                </h4>
+                <div className="divide-y divide-slate-100 space-y-2">
+                  {auditLogs.map((log) => (
+                    <div key={log.id} className="pt-2 first:pt-0 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-slate-900">
+                          {log.action}
+                        </span>
+                        <span className="font-mono text-[11px] text-slate-400 tabular-nums">
+                          {log.timestamp}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        {log.details}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        Par {log.actor} ({log.role})
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>
       )}
 
       {/* QUIET FOOTER */}
-      <footer className="bg-white border-t border-slate-200 px-6 py-4 text-xs text-slate-500 no-print mt-auto">
+      <footer
+        className={`border-t px-6 py-4 text-xs no-print mt-auto ${
+          darkMode
+            ? 'bg-slate-900 border-slate-800 text-slate-400'
+            : 'bg-white border-slate-200 text-slate-500'
+        }`}
+      >
         <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-4">
           <span>
-            {SCHOOL_INFO.subtitle} · ChronoScolaire AI
+            {selectedCampus} · {SCHOOL_INFO.subtitle} · ChronoScolaire AI
           </span>
           <span>
-            Compatible format paysage aSc Horaires · Export PDF, MySQL & MongoDB Atlas
+            Moteur Hybride CP-SAT & Gemini AI · Format Paysage PDF aSc Horaires · Excel, iCal, SQL & Atlas
           </span>
         </div>
       </footer>

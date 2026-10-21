@@ -137,9 +137,10 @@ async function startServer() {
         teacherConstraints,
         customInstructions,
         maxPeriodsPerDay,
+        lockedSlots,
       } = req.body;
 
-      const prompt = `Tu es un moteur expert de planification d'emplois du temps scolaires (supérieur à aSc Timetables) pour l'établissement "Al-Kawthar International Schools" à Djeddah.
+      const prompt = `Tu es un moteur expert de planification d'emplois du temps scolaires (supérieur à aSc Timetables) combiné à un solveur de contraintes strictes pour l'établissement "Al-Kawthar International Schools" à Djeddah.
 Classe cible : "${className}" (Section: ${section})
 Jours scolaires : Dimanche, Lundi, Mardi, Mercredi, Jeudi.
 Nombre de périodes par jour : ${maxPeriodsPerDay || 8} (numérotées de 1 à ${maxPeriodsPerDay || 8}).
@@ -147,13 +148,16 @@ Nombre de périodes par jour : ${maxPeriodsPerDay || 8} (numérotées de 1 à ${
 Emploi du temps actuel de la classe (format JSON clé "Jour_Période"):
 ${JSON.stringify(currentSlots, null, 2)}
 
-Contraintes de disponibilité des enseignants concernés (créneaux indisponibles "Jour_Période"):
+Séances verrouillées à ne JAMAIS déplacer (Contrainte stricte HC_04) :
+${JSON.stringify(lockedSlots || [])}
+
+Contraintes d'indisponibilité des enseignants concernés (Contrainte stricte HC_02 - créneaux "Jour_Période"):
 ${JSON.stringify(teacherConstraints || [], null, 2)}
 
 Instructions spécifiques de l'administrateur :
-${customInstructions || "Optimiser la répartition pédagogique des matières sur la semaine, éliminer tout conflit d'indisponibilité des enseignants, éviter plus de 2 séances consécutives de la même matière, et conserver exactement le volume horaire et les enseignants attribués à cette classe."}
+${customInstructions || "Optimiser la répartition pédagogique des matières sur la semaine, placer les matières principales le matin (P1-P4), éliminer tout conflit d'indisponibilité des enseignants, éviter plus de 2 séances consécutives de la même matière, et conserver 100% des séances obligatoires sans jamais en supprimer une seule."}
 
-Génère l'emploi du temps complet optimisé pour cette classe en respectant strictement les enseignants et matières de la classe, tout en évitant tous les créneaux indisponibles.`;
+Génère l'emploi du temps complet optimisé pour cette classe en respectant strictement le volume horaire, les séances verrouillées et les enseignants attribués.`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
@@ -166,9 +170,9 @@ Génère l'emploi du temps complet optimisé pour cette classe en respectant str
               summary: {
                 type: Type.STRING,
                 description:
-                  "Résumé clair en français des optimisations pédagogiques et des conflits résolus par Gemini AI.",
+                  "Résumé clair en français des optimisations pédagogiques et des compromis effectués.",
               },
-               pedagogicalScore: {
+              pedagogicalScore: {
                 type: Type.INTEGER,
                 description: "Score d'équilibre pédagogique sur 100.",
               },
@@ -229,6 +233,105 @@ Génère l'emploi du temps complet optimisé pour cette classe en respectant str
           error instanceof Error
             ? error.message
             : "Erreur lors de l'optimisation Gemini AI.",
+      });
+    }
+  });
+
+  // REST API: Gemini AI Conversational Timetable Assistant (with Constraint Engine Verification)
+  app.post('/api/gemini/conversational-assistant', async (req, res) => {
+    try {
+      const {
+        userInstruction,
+        targetClass,
+        lockedSlots,
+        teacherConstraints,
+        qualitySummary,
+      } = req.body;
+
+      const prompt = `Tu es l'Assistant IA Conversationnel de Planification Scolaire de ChronoScolaire AI (Al-Kawthar International Schools, Jeddah).
+L'administrateur te formule cette demande en langage naturel :
+"${userInstruction}"
+
+Contexte de la classe actuellement sélectionnée ("${targetClass?.name}", Section: ${targetClass?.section}) :
+Créneaux actuels ("Jour_Période") :
+${JSON.stringify(targetClass?.slots || {}, null, 2)}
+
+Créneaux verrouillés (HC_04 - ne jamais déplacer) :
+${JSON.stringify(lockedSlots || [])}
+
+Indisponibilités des enseignants (HC_02) :
+${JSON.stringify(teacherConstraints || [])}
+
+Indicateurs de qualité actuels de l'établissement :
+${JSON.stringify(qualitySummary || {})}
+
+Règles strictes :
+1. Ne supprime JAMAIS une séance obligatoire : procède uniquement par permutation (swap) entre deux créneaux de la même classe ("fromKey" et "toKey" au format "Jour_Période", ex: "Dimanche_1" et "Dimanche_6").
+2. Si la demande de l'administrateur viole une contrainte stricte (séance verrouillée ou enseignant indisponible), signale-le dans "incompatibleConstraintsWarning" et propose une alternative sûre.
+3. Explique clairement ta réponse et les permutations proposées dans "assistantReply".`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              assistantReply: {
+                type: Type.STRING,
+                description:
+                  "Réponse détaillée, pédagogique et claire à l'administrateur.",
+              },
+              incompatibleConstraintsWarning: {
+                type: Type.STRING,
+                description:
+                  "Avertissement si une contrainte stricte empêche la demande exacte, ou chaîne vide si tout est compatible.",
+              },
+              proposedSwaps: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    className: {
+                      type: Type.STRING,
+                      description: 'Nom de la classe concernée, ex: PEI2',
+                    },
+                    fromKey: {
+                      type: Type.STRING,
+                      description: 'Clé du créneau source, ex: Mardi_4',
+                    },
+                    toKey: {
+                      type: Type.STRING,
+                      description: 'Clé du créneau destination, ex: Mardi_7',
+                    },
+                    reason: {
+                      type: Type.STRING,
+                      description: 'Justification de cette permutation',
+                    },
+                  },
+                  required: ['className', 'fromKey', 'toKey', 'reason'],
+                },
+              },
+            },
+            required: [
+              'assistantReply',
+              'incompatibleConstraintsWarning',
+              'proposedSwaps',
+            ],
+          },
+        },
+      });
+
+      const parsed = JSON.parse(response.text || '{}');
+      res.json(parsed);
+    } catch (error: unknown) {
+      console.error('Gemini conversational-assistant error:', error);
+      res.status(500).json({
+        error:
+          error instanceof Error
+            ? error.message
+            : "Erreur lors de l'analyse par l'assistant IA conversationnel.",
       });
     }
   });
