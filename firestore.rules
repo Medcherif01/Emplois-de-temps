@@ -1,0 +1,144 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == "cherifmed2010@gmail.com"
+      );
+    }
+
+    // Validation Blueprints
+    function isValidSchoolClass(data) {
+      return data.keys().hasAll(['name', 'section', 'room', 'visibility', 'slots', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'section', 'room', 'visibility', 'slots', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        data.section is string && data.section in ['KG', 'KG3_GS', 'Primary', 'Secondary_Girls', 'Secondary_Boys'] &&
+        data.room is string && data.room.size() >= 1 && data.room.size() <= 100 &&
+        data.visibility is string && data.visibility == 'school' &&
+        data.slots is map && data.slots.size() <= 60 &&
+        data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
+        data.updatedBy.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.updatedBy == request.auth.uid &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidTeacher(data) {
+      return data.keys().hasAll(['name', 'subjects', 'section', 'maxPeriodsPerWeek', 'unavailableSlots', 'defaultAssigned', 'visibility', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['name', 'subjects', 'section', 'maxPeriodsPerWeek', 'unavailableSlots', 'defaultAssigned', 'visibility', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.subjects is list && data.subjects.size() >= 1 && data.subjects.size() <= 10 &&
+        data.subjects[0] is string && data.subjects[0].size() <= 80 &&
+        data.section is string && data.section.size() >= 1 && data.section.size() <= 80 &&
+        data.maxPeriodsPerWeek is int && data.maxPeriodsPerWeek >= 1 && data.maxPeriodsPerWeek <= 45 &&
+        data.unavailableSlots is list && data.unavailableSlots.size() <= 40 &&
+        (data.unavailableSlots.size() == 0 || (data.unavailableSlots[0] is string && data.unavailableSlots[0].size() <= 40)) &&
+        data.defaultAssigned is bool &&
+        data.visibility is string && data.visibility == 'school' &&
+        data.updatedBy is string && data.updatedBy.size() >= 1 && data.updatedBy.size() <= 128 &&
+        data.updatedBy.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.updatedBy == request.auth.uid &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['title', 'message', 'type', 'targetTeacher', 'visibility', 'authorId', 'createdAt']) &&
+        data.keys().hasOnly(['title', 'message', 'type', 'targetTeacher', 'visibility', 'authorId', 'createdAt']) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.message is string && data.message.size() >= 1 && data.message.size() <= 500 &&
+        data.type is string && data.type in ['conflict_resolved', 'schedule_updated', 'ai_generated', 'teacher_assigned', 'availability_changed'] &&
+        data.targetTeacher is string && data.targetTeacher.size() >= 1 && data.targetTeacher.size() <= 120 &&
+        data.visibility is string && data.visibility == 'school' &&
+        data.authorId is string && data.authorId.size() >= 1 && data.authorId.size() <= 128 &&
+        data.authorId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.authorId == request.auth.uid &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['uid', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.uid == request.auth.uid &&
+        data.createdAt is timestamp;
+    }
+
+    // Collection: /classes/{classId}
+    match /classes/{classId} {
+      allow get: if isSignedIn() && isValidId(classId) && existing().visibility == 'school';
+      allow list: if isSignedIn() && existing().visibility == 'school';
+      allow create: if isVerifiedUser() && isValidId(classId) && isValidSchoolClass(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidId(classId) && isValidSchoolClass(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['slots', 'room', 'updatedBy', 'updatedAt'])
+        );
+      allow delete: if isAdmin() && isValidId(classId);
+    }
+
+    // Collection: /teachers/{teacherId}
+    match /teachers/{teacherId} {
+      allow get: if isSignedIn() && isValidId(teacherId) && existing().visibility == 'school';
+      allow list: if isSignedIn() && existing().visibility == 'school';
+      allow create: if isVerifiedUser() && isValidId(teacherId) && isValidTeacher(incoming()) &&
+        incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidId(teacherId) && isValidTeacher(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly(['unavailableSlots', 'maxPeriodsPerWeek', 'defaultAssigned', 'subjects', 'updatedBy', 'updatedAt'])
+        );
+      allow delete: if isAdmin() && isValidId(teacherId);
+    }
+
+    // Collection: /notifications/{notificationId}
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() && isValidId(notificationId) && existing().visibility == 'school';
+      allow list: if isSignedIn() && existing().visibility == 'school';
+      allow create: if isVerifiedUser() && isValidId(notificationId) && isValidNotification(incoming()) &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(notificationId);
+    }
+
+    // Collection: /admins/{adminId}
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list: if false;
+      allow create: if isAdmin() && isValidId(adminId) && isValidAdmin(incoming()) &&
+        adminId == request.auth.uid && incoming().createdAt == request.time;
+      allow update, delete: if false;
+    }
+  }
+}

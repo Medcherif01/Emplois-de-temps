@@ -1,0 +1,6 @@
+{
+  "name": "ChronoScolaire AI — Planification & Emplois du Temps",
+  "description": "Plateforme avancée de génération automatique d'emplois du temps scolaires propulsée par Gemini AI, avec gestion des disponibilités, détection des conflits, impression PDF paysage et notifications en temps réel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

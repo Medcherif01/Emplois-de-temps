@@ -1,0 +1,199 @@
+{
+  "entities": {
+    "SchoolClass": {
+      "title": "SchoolClass",
+      "description": "Represents a school class timetable and its scheduled period slots.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name of the class (e.g., Pre-KG, KG1, G1 Girls, PEI1).",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "section": {
+          "type": "string",
+          "description": "Bell schedule section of the class.",
+          "enum": ["KG", "KG3_GS", "Primary", "Secondary_Girls", "Secondary_Boys"]
+        },
+        "room": {
+          "type": "string",
+          "description": "Assigned classroom identifier.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "visibility": {
+          "type": "string",
+          "description": "Access scope for school members.",
+          "enum": ["school"]
+        },
+        "slots": {
+          "type": "object",
+          "description": "Map of day_period keys to scheduled lesson details."
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the user who last updated the timetable.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": ["name", "section", "room", "visibility", "slots", "updatedBy", "createdAt", "updatedAt"]
+    },
+    "Teacher": {
+      "title": "Teacher",
+      "description": "Represents a teacher, their subjects, workload, and availability constraints.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Full name or identifier of the teacher.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "subjects": {
+          "type": "array",
+          "description": "List of subjects taught by this teacher."
+        },
+        "section": {
+          "type": "string",
+          "description": "Primary school division or campus section.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "maxPeriodsPerWeek": {
+          "type": "integer",
+          "description": "Maximum weekly teaching periods."
+        },
+        "unavailableSlots": {
+          "type": "array",
+          "description": "List of day_period keys when the teacher is unavailable."
+        },
+        "defaultAssigned": {
+          "type": "boolean",
+          "description": "Whether the default school timetable is assigned to this teacher."
+        },
+        "visibility": {
+          "type": "string",
+          "description": "Access scope for school members.",
+          "enum": ["school"]
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID of the user who last updated this teacher record.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update."
+        }
+      },
+      "required": ["name", "subjects", "section", "maxPeriodsPerWeek", "unavailableSlots", "defaultAssigned", "visibility", "updatedBy", "createdAt", "updatedAt"]
+    },
+    "NotificationItem": {
+      "title": "NotificationItem",
+      "description": "Real-time notification for timetable changes, AI optimizations, or conflict alerts.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Short notification title.",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "message": {
+          "type": "string",
+          "description": "Detailed notification body.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "type": {
+          "type": "string",
+          "description": "Category of notification.",
+          "enum": ["conflict_resolved", "schedule_updated", "ai_generated", "teacher_assigned", "availability_changed"]
+        },
+        "targetTeacher": {
+          "type": "string",
+          "description": "Name of the teacher affected or 'all'.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "visibility": {
+          "type": "string",
+          "description": "Access scope for school members.",
+          "enum": ["school"]
+        },
+        "authorId": {
+          "type": "string",
+          "description": "UID of the user who triggered the notification.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation."
+        }
+      },
+      "required": ["title", "message", "type", "targetTeacher", "visibility", "authorId", "createdAt"]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Trusted administrator registry document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the administrator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of admin creation."
+        }
+      },
+      "required": ["uid", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/classes/{classId}": {
+      "schema": { "$ref": "#/entities/SchoolClass" },
+      "description": "Collection of school class timetables."
+    },
+    "/teachers/{teacherId}": {
+      "schema": { "$ref": "#/entities/Teacher" },
+      "description": "Collection of school teachers and their availability."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/NotificationItem" },
+      "description": "Collection of real-time timetable notifications."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Trusted registry of administrator UIDs."
+    }
+  }
+}
