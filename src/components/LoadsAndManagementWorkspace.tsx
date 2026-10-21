@@ -55,7 +55,8 @@ interface LoadsAndManagementWorkspaceProps {
     subjectName: string,
     teacherName: string,
     targetPeriods: number,
-    groupName?: string
+    groupName?: string,
+    assistantTeacher?: string
   ) => void;
   onModifyClassLoadItem: (params: {
     classId: string;
@@ -65,6 +66,7 @@ interface LoadsAndManagementWorkspaceProps {
     newTeacher: string;
     newPeriods: number;
     newGroupLabel: string;
+    newAssistantTeacher?: string;
   }) => void;
   onModifyTeacherLoadLine: (params: {
     teacherName: string;
@@ -212,6 +214,7 @@ export const LoadsAndManagementWorkspace: React.FC<
   >(null);
   const [newClassSubjName, setNewClassSubjName] = useState('');
   const [newClassSubjTeacher, setNewClassSubjTeacher] = useState('');
+  const [newClassSubjAssistant, setNewClassSubjAssistant] = useState('');
   const [newClassSubjGroup, setNewClassSubjGroup] = useState('Classe complète');
   const [newClassSubjPeriods, setNewClassSubjPeriods] = useState(4);
 
@@ -1170,8 +1173,8 @@ export const LoadsAndManagementWorkspace: React.FC<
                   <th className="py-2.5 px-3 border-r border-slate-400 w-60">
                     Matière
                   </th>
-                  <th className="py-2.5 px-3 border-r border-slate-400 w-60">
-                    Professeur / Enseignant
+                  <th className="py-2.5 px-3 border-r border-slate-400 w-72">
+                    Professeur Principal &amp; Assistant(e)
                   </th>
                   <th className="py-2.5 px-3 border-r border-slate-400 w-52">
                     Groupe / Mode
@@ -1194,6 +1197,7 @@ export const LoadsAndManagementWorkspace: React.FC<
                             id: 'empty_cls',
                             subject: 'Aucune matière',
                             teacher: 'Non affecté',
+                            assistantTeacher: undefined as string | undefined,
                             groupLabel: 'Classe complète',
                             periods: 0,
                             isIntercalated: false,
@@ -1302,32 +1306,77 @@ export const LoadsAndManagementWorkspace: React.FC<
                               )}
                             </td>
 
-                            {/* Column 3: Professeur / Enseignant (Editable inline) */}
+                            {/* Column 3: Professeur / Enseignant + Assistant(e) (Editable inline) */}
                             <td className="py-1.5 px-3 border-r border-slate-300 align-middle">
                               {item.id === 'empty_cls' ? (
                                 <span className="text-slate-400">—</span>
                               ) : (
-                                <select
-                                  value={item.teacher}
-                                  onChange={(e) =>
-                                    onModifyClassLoadItem({
-                                      classId: block.classId,
-                                      oldSubject: item.subject,
-                                      oldTeacher: item.teacher,
-                                      newSubject: item.subject,
-                                      newTeacher: e.target.value,
-                                      newPeriods: item.periods,
-                                      newGroupLabel: item.groupLabel,
-                                    })
-                                  }
-                                  className="w-full bg-transparent font-bold text-slate-800 hover:bg-white focus:bg-white px-1.5 py-1 rounded border border-transparent hover:border-slate-300 focus:border-indigo-500 text-xs cursor-pointer"
-                                >
-                                  {allTeacherNames.map((t) => (
-                                    <option key={t} value={t}>
-                                      {t}
-                                    </option>
-                                  ))}
-                                </select>
+                                <div className="space-y-1">
+                                  <select
+                                    value={item.teacher}
+                                    onChange={(e) =>
+                                      onModifyClassLoadItem({
+                                        classId: block.classId,
+                                        oldSubject: item.subject,
+                                        oldTeacher: item.teacher,
+                                        newSubject: item.subject,
+                                        newTeacher: e.target.value,
+                                        newPeriods: item.periods,
+                                        newGroupLabel: item.groupLabel,
+                                        newAssistantTeacher:
+                                          item.assistantTeacher,
+                                      })
+                                    }
+                                    className="w-full bg-transparent font-bold text-slate-800 hover:bg-white focus:bg-white px-1.5 py-0.5 rounded border border-transparent hover:border-slate-300 focus:border-indigo-500 text-xs cursor-pointer"
+                                  >
+                                    {allTeacherNames.map((t) => (
+                                      <option key={t} value={t}>
+                                        Prof : {t}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <div className="flex items-center gap-1">
+                                    <span className="text-[9px] font-extrabold uppercase text-fuchsia-700 bg-fuchsia-50 px-1.5 py-0.5 rounded border border-fuchsia-200 shrink-0">
+                                      + Ass.
+                                    </span>
+                                    <select
+                                      value={item.assistantTeacher || ''}
+                                      onChange={(e) =>
+                                        onModifyClassLoadItem({
+                                          classId: block.classId,
+                                          oldSubject: item.subject,
+                                          oldTeacher: item.teacher,
+                                          newSubject: item.subject,
+                                          newTeacher: item.teacher,
+                                          newPeriods: item.periods,
+                                          newGroupLabel:
+                                            e.target.value &&
+                                            item.groupLabel ===
+                                              'Classe complète'
+                                              ? `Avec Ass. ${e.target.value}`
+                                              : item.groupLabel,
+                                          newAssistantTeacher: e.target.value,
+                                        })
+                                      }
+                                      className={`w-full px-1.5 py-0.5 rounded border text-[10px] font-bold cursor-pointer ${
+                                        item.assistantTeacher
+                                          ? 'bg-fuchsia-100/80 text-fuchsia-900 border-fuchsia-300'
+                                          : 'bg-slate-50 text-slate-400 border-slate-200 hover:border-slate-300'
+                                      }`}
+                                    >
+                                      <option value="">
+                                        — Aucun assistant(e) —
+                                      </option>
+                                      {allTeacherNames
+                                        .filter((t) => t !== item.teacher)
+                                        .map((t) => (
+                                          <option key={t} value={t}>
+                                            + Ass. {t}
+                                          </option>
+                                        ))}
+                                    </select>
+                                  </div>
+                                </div>
                               )}
                             </td>
 
@@ -1516,6 +1565,24 @@ export const LoadsAndManagementWorkspace: React.FC<
                                   ))}
                                 </select>
                                 <select
+                                  value={newClassSubjAssistant}
+                                  onChange={(e) =>
+                                    setNewClassSubjAssistant(e.target.value)
+                                  }
+                                  className="px-2.5 py-1.5 bg-fuchsia-50 border border-fuchsia-300 text-fuchsia-900 rounded font-bold text-xs"
+                                >
+                                  <option value="">
+                                    + Assistant(e) : Aucun
+                                  </option>
+                                  {allTeacherNames
+                                    .filter((t) => t !== newClassSubjTeacher)
+                                    .map((t) => (
+                                      <option key={t} value={t}>
+                                        + Ass. {t}
+                                      </option>
+                                    ))}
+                                </select>
+                                <select
                                   value={newClassSubjGroup}
                                   onChange={(e) =>
                                     setNewClassSubjGroup(e.target.value)
@@ -1551,9 +1618,11 @@ export const LoadsAndManagementWorkspace: React.FC<
                                         newClassSubjName.trim(),
                                         newClassSubjTeacher.trim(),
                                         newClassSubjPeriods,
-                                        newClassSubjGroup
+                                        newClassSubjGroup,
+                                        newClassSubjAssistant.trim() || undefined
                                       );
                                       setAddingSubjectForClassId(null);
+                                      setNewClassSubjAssistant('');
                                     }
                                   }}
                                   className="px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer"

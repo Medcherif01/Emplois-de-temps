@@ -158,8 +158,11 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                       colSpan={5}
                       className="border border-slate-800 bg-[#8ec5fe] text-center align-middle"
                     >
-                      <span className="text-xs font-semibold text-slate-900/80 tracking-wide">
+                      <span className="text-xs font-semibold text-slate-900/90 tracking-wide">
                         {row.label} ({row.time})
+                        {row.supervisorTeacher
+                          ? ` · Surveillance / Garde : ${row.supervisorTeacher}`
+                          : ''}
                       </span>
                     </td>
                   </tr>
@@ -286,6 +289,9 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                                 </div>
                                 <div className="text-[10px] font-medium text-slate-800 text-right truncate">
                                   {cell.teacher}
+                                  {cell.assistantTeacher
+                                    ? ` + Ass. ${cell.assistantTeacher}`
+                                    : ''}
                                 </div>
                               </div>
                               <div className="flex flex-col justify-between p-1.5 h-full pt-3.5">
@@ -310,9 +316,19 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                                     ⊕ +{cell.jointWithClasses.join(', ')}
                                   </span>
                                 )}
+                              {cell.assistantTeacher &&
+                                !cell.jointWithClasses?.length && (
+                                  <span
+                                    title={`Co-enseignement : ${cell.teacher} + Assistant(e) ${cell.assistantTeacher}`}
+                                    className="absolute top-0.5 left-1 px-1 py-0.2 bg-teal-100 text-teal-900 border border-teal-300 rounded text-[8.5px] font-bold leading-none"
+                                  >
+                                    2 Profs (+Ass. {cell.assistantTeacher})
+                                  </span>
+                                )}
                               <div
                                 className={`text-center font-bold text-[15px] text-slate-950 leading-snug truncate ${
-                                  cell.jointWithClasses?.length
+                                  cell.jointWithClasses?.length ||
+                                  cell.assistantTeacher
                                     ? 'mt-2.5'
                                     : 'mt-1'
                                 }`}
@@ -320,8 +336,11 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                                 {cell.subject}
                               </div>
                               <div className="flex items-center justify-between gap-1">
-                                <span className="text-[11px] font-medium text-slate-800 truncate">
+                                <span className="text-[10.5px] font-semibold text-slate-800 truncate">
                                   {cell.teacher}
+                                  {cell.assistantTeacher
+                                    ? ` + Ass. ${cell.assistantTeacher}`
+                                    : ''}
                                 </span>
                                 {(isTeacherView || cell.room) && cell.room && (
                                   <span className="text-[10px] text-slate-500 truncate">

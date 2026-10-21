@@ -87,6 +87,10 @@ import {
 import { MasterEnsembleMatrix } from './components/MasterEnsembleMatrix';
 import { LoadsAndManagementWorkspace } from './components/LoadsAndManagementWorkspace';
 import {
+  AscModalType,
+  AscTimetablesRibbonAndDialogs,
+} from './components/AscTimetablesRibbonAndDialogs';
+import {
   CATEGORY_SHORT_LABELS,
   classMatchesCategory,
   computeClassesLoadReport,
@@ -336,6 +340,9 @@ export default function App() {
   const [liveToast, setLiveToast] = useState<NotificationEntry | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
+  // aSc TimeTables Dedicated Modal State (Constraints, Timings, Breaks, Assistant, Lesson Contract, All Settings)
+  const [activeAscModal, setActiveAscModal] = useState<AscModalType>(null);
+
   // Cell Editor Modal
   const [editingCell, setEditingCell] = useState<{
     classId: string;
@@ -343,6 +350,7 @@ export default function App() {
     period: number;
     subject: string;
     teacher: string;
+    assistantTeacher: string;
     subSubject: string;
     subTeacher: string;
     room: string;
@@ -994,6 +1002,8 @@ export default function App() {
       period,
       subject: slotToUse?.subject || '',
       teacher: slotToUse?.teacher || '',
+      assistantTeacher:
+        slotToUse?.assistantTeacher || targetCls.defaultAssistant || '',
       subSubject: slotToUse?.subSubject || '',
       subTeacher: slotToUse?.subTeacher || '',
       room: slotToUse?.room || targetCls.room,
@@ -1017,6 +1027,9 @@ export default function App() {
         teacher: editingCell.teacher.trim(),
         room: editingCell.room.trim() || targetCls.room,
       };
+      if (editingCell.assistantTeacher.trim()) {
+        updatedSlot.assistantTeacher = editingCell.assistantTeacher.trim();
+      }
       if (editingCell.subSubject.trim() && editingCell.subTeacher.trim()) {
         updatedSlot.subSubject = editingCell.subSubject.trim();
         updatedSlot.subTeacher = editingCell.subTeacher.trim();
@@ -1459,7 +1472,8 @@ export default function App() {
     subjectName: string,
     teacherName: string,
     targetPeriods: number,
-    groupName?: string
+    groupName?: string,
+    assistantTeacher?: string
   ) => {
     const cls = classes.find((c) => c.id === classId);
     if (!cls) return;
@@ -1493,6 +1507,8 @@ export default function App() {
             nextSlots[k] = {
               subject: subjectName.trim(),
               teacher: effectiveTeacher,
+              assistantTeacher:
+                assistantTeacher?.trim() || cls.defaultAssistant || undefined,
               room: cls.room,
               groupName: groupName || 'Classe complète',
             };
@@ -1518,7 +1534,9 @@ export default function App() {
     });
     appendAuditLog(
       `Mise à jour Load (${cls.name})`,
-      `${subjectName} (${effectiveTeacher}) -> ${targetPeriods} séances/sem.`
+      `${subjectName} (${effectiveTeacher}${
+        assistantTeacher ? ` + Ass. ${assistantTeacher}` : ''
+      }) -> ${targetPeriods} séances/sem.`
     );
   };
 
@@ -1531,6 +1549,7 @@ export default function App() {
     newTeacher: string;
     newPeriods: number;
     newGroupLabel: string;
+    newAssistantTeacher?: string;
   }) => {
     const cls = classes.find((c) => c.id === params.classId);
     if (!cls) return;
@@ -1548,14 +1567,22 @@ export default function App() {
       }
     }
 
-    // Update existing matching slots with new subject, teacher, and group
+    // Update existing matching slots with new subject, teacher, assistant, and group
     for (const k of matchingKeys) {
-      nextSlots[k] = {
+      const updatedSlot: LessonSlot = {
         ...nextSlots[k],
         subject: params.newSubject.trim(),
         teacher: params.newTeacher.trim(),
         groupName: params.newGroupLabel,
       };
+      if (params.newAssistantTeacher !== undefined) {
+        if (params.newAssistantTeacher.trim()) {
+          updatedSlot.assistantTeacher = params.newAssistantTeacher.trim();
+        } else {
+          delete updatedSlot.assistantTeacher;
+        }
+      }
+      nextSlots[k] = updatedSlot;
     }
 
     const delta = params.newPeriods - matchingKeys.length;
@@ -1571,6 +1598,10 @@ export default function App() {
             nextSlots[k] = {
               subject: params.newSubject.trim(),
               teacher: params.newTeacher.trim(),
+              assistantTeacher:
+                params.newAssistantTeacher?.trim() ||
+                cls.defaultAssistant ||
+                undefined,
               room: cls.room,
               groupName: params.newGroupLabel,
             };
@@ -1592,7 +1623,9 @@ export default function App() {
     });
     appendAuditLog(
       `Modification Load Classe (${cls.name})`,
-      `${params.newSubject} (${params.newTeacher}) : ${params.newPeriods}p/sem`
+      `${params.newSubject} (${params.newTeacher}${
+        params.newAssistantTeacher ? ` + Ass. ${params.newAssistantTeacher}` : ''
+      }) : ${params.newPeriods}p/sem`
     );
   };
 
@@ -1900,6 +1933,337 @@ export default function App() {
     appendAuditLog(
       `Impression Vue Ensemble (${CATEGORY_SHORT_LABELS[selectedCategory]})`,
       `Matrice complète multi-classes exportée en HTML/PDF Paysage.`
+    );
+  };
+
+  // =====================================================================
+  // aSc TIMETABLES RIBBON & DIALOG HANDLERS (Assistant, Time-Off, Lesson Contract, Global Lock)
+  // =====================================================================
+  const handleAssignAssistantToClassOrSubject = async (params: {
+    mode: 'whole_class' | 'subject_in_class' | 'single_slot';
+    classId: string;
+    subjectName?: string;
+    mainTeacherName?: string;
+    assistantTeacherName: string;
+    day?: DayOfWeek;
+    period?: number;
+  }) => {
+    const cleanAssistant = params.assistantTeacherName.trim();
+    if (!cleanAssistant || !params.classId) return;
+
+    // Ensure the assistant exists in teachers list so their Load & Timetable are tracked
+    const existingTeacher = teachers.find(
+      (t) => t.name.toLowerCase() === cleanAssistant.toLowerCase()
+    );
+    if (!existingTeacher) {
+      const newAssProfile: TeacherProfile = {
+        id: `teacher_ass_${Date.now()}`,
+        name: cleanAssistant,
+        subjects: ['Assistant(e) Pédagogique', 'Co-enseignement'],
+        section: 'KG & Primary',
+        category: 'KG_Primary',
+        isAssistant: true,
+        maxPeriodsPerWeek: 30,
+        unavailableSlots: [],
+        defaultAssigned: true,
+        visibility: 'school',
+        updatedBy: 'Direction',
+      };
+      await saveTeacherToStore(newAssProfile);
+    }
+
+    const cls = classes.find((c) => c.id === params.classId);
+    if (!cls) return;
+
+    const nextSlots = { ...cls.slots };
+    let updatedSlotCount = 0;
+
+    if (params.mode === 'single_slot' && params.day && params.period) {
+      const key = `${params.day}_${params.period}`;
+      if (nextSlots[key]) {
+        nextSlots[key] = {
+          ...nextSlots[key],
+          assistantTeacher: cleanAssistant,
+        };
+        updatedSlotCount = 1;
+      } else {
+        nextSlots[key] = {
+          subject: params.subjectName?.trim() || 'Activité / Atelier',
+          teacher:
+            params.mainTeacherName?.trim() ||
+            teachers[0]?.name ||
+            'Enseignant',
+          assistantTeacher: cleanAssistant,
+          room: cls.room,
+        };
+        updatedSlotCount = 1;
+      }
+    } else if (params.mode === 'subject_in_class') {
+      for (const [k, s] of Object.entries(nextSlots)) {
+        const subjectMatch =
+          !params.subjectName ||
+          params.subjectName === 'ALL' ||
+          s.subject.trim().toLowerCase() ===
+            params.subjectName.trim().toLowerCase();
+        const teacherMatch =
+          !params.mainTeacherName ||
+          params.mainTeacherName === 'ALL' ||
+          s.teacher.trim().toLowerCase() ===
+            params.mainTeacherName.trim().toLowerCase();
+
+        if (subjectMatch && teacherMatch) {
+          nextSlots[k] = {
+            ...s,
+            assistantTeacher: cleanAssistant,
+          };
+          updatedSlotCount++;
+        }
+      }
+    } else {
+      // whole_class
+      for (const [k, s] of Object.entries(nextSlots)) {
+        nextSlots[k] = {
+          ...s,
+          assistantTeacher: cleanAssistant,
+        };
+        updatedSlotCount++;
+      }
+    }
+
+    await saveClassToStore({
+      ...cls,
+      defaultAssistant:
+        params.mode === 'whole_class' ? cleanAssistant : cls.defaultAssistant,
+      slots: nextSlots,
+    });
+
+    appendAuditLog(
+      `Affectation Enseignant + Assistant(e) (${cleanAssistant})`,
+      `Assistant(e) ${cleanAssistant} associé(e) sur ${updatedSlotCount} séance(s) en ${cls.name}.`
+    );
+    await triggerRealtimeNotification(
+      `Binôme Enseignant + Assistant(e) : ${cleanAssistant}`,
+      `${cleanAssistant} a été affecté(e) en tant qu'assistant(e) sur ${updatedSlotCount} séance(s) en ${cls.name}.`,
+      'teacher_assigned',
+      cleanAssistant
+    );
+  };
+
+  const handleRemoveAssistantFromClassOrSubject = async (
+    classId: string,
+    subjectName?: string
+  ) => {
+    const cls = classes.find((c) => c.id === classId);
+    if (!cls) return;
+    const nextSlots = { ...cls.slots };
+    for (const [k, s] of Object.entries(nextSlots)) {
+      if (
+        !subjectName ||
+        subjectName === 'ALL' ||
+        s.subject.trim().toLowerCase() === subjectName.trim().toLowerCase()
+      ) {
+        const copy = { ...s };
+        delete copy.assistantTeacher;
+        nextSlots[k] = copy;
+      }
+    }
+    await saveClassToStore({
+      ...cls,
+      defaultAssistant:
+        !subjectName || subjectName === 'ALL'
+          ? undefined
+          : cls.defaultAssistant,
+      slots: nextSlots,
+    });
+    appendAuditLog(
+      `Retrait Assistant(e) (${cls.name})`,
+      `Assistant retiré pour ${
+        !subjectName || subjectName === 'ALL' ? 'toute la classe' : subjectName
+      }.`
+    );
+  };
+
+  const handleUpdateTeacherTimeOff = async (
+    teacherId: string,
+    unavailableSlots: string[],
+    questionableSlots: string[]
+  ) => {
+    const target = teachers.find((t) => t.id === teacherId);
+    if (!target) return;
+    const updated: TeacherProfile = {
+      ...target,
+      unavailableSlots,
+      questionableSlots,
+    };
+    await saveTeacherToStore(updated);
+    appendAuditLog(
+      `Temps Libre aSc (${target.name})`,
+      `${unavailableSlots.length} créneaux interdits (✕), ${questionableSlots.length} à éviter (?).`
+    );
+  };
+
+  const handleUpdateClassTimeOff = async (
+    classId: string,
+    unavailableSlots: string[]
+  ) => {
+    const cls = classes.find((c) => c.id === classId);
+    if (!cls) return;
+    await saveClassToStore({
+      ...cls,
+      unavailableSlots,
+    });
+    appendAuditLog(
+      `Temps Libre Classe (${cls.name})`,
+      `${unavailableSlots.length} créneaux fermés pour ${cls.name}.`
+    );
+  };
+
+  const handleCreateAscLessonContract = async (payload: {
+    mainTeacher: string;
+    assistantTeacher?: string;
+    subject: string;
+    classIds: string[];
+    groupLabel: string;
+    periodsPattern: string;
+    room?: string;
+  }) => {
+    const cleanSubject = payload.subject.trim();
+    const cleanTeacher = payload.mainTeacher.trim();
+    const cleanAssistant = payload.assistantTeacher?.trim() || undefined;
+    if (!cleanSubject || !cleanTeacher || payload.classIds.length === 0) return;
+
+    // Parse pattern like "2+1+1" -> [2, 1, 1] or "5" -> [1,1,1,1,1]
+    const blocks = payload.periodsPattern.includes('+')
+      ? payload.periodsPattern
+          .split('+')
+          .map((n) => parseInt(n.trim(), 10))
+          .filter((n) => !isNaN(n) && n > 0)
+      : Array.from(
+          { length: Math.max(1, parseInt(payload.periodsPattern, 10) || 1) },
+          () => 1
+        );
+
+    const totalWeekly = blocks.reduce((acc, b) => acc + b, 0);
+    const isMultiClass = payload.classIds.length > 1;
+    const jointClassNames = isMultiClass
+      ? classes
+          .filter((c) => payload.classIds.includes(c.id))
+          .map((c) => c.name)
+      : undefined;
+
+    const targetSet = new Set(payload.classIds);
+    const nextClasses = classes.map((cls) => {
+      if (!targetSet.has(cls.id)) return cls;
+      const nextSlots = { ...cls.slots };
+
+      // Clear previous slots of the same subject+teacher in this class to apply the new contract cleanly
+      for (const [k, s] of Object.entries(nextSlots)) {
+        if (
+          s.subject.trim().toLowerCase() === cleanSubject.toLowerCase() &&
+          s.teacher.trim().toLowerCase() === cleanTeacher.toLowerCase()
+        ) {
+          delete nextSlots[k];
+        }
+      }
+
+      const maxP =
+        cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+      const usedDays = new Set<DayOfWeek>();
+
+      for (const blockLen of blocks) {
+        let placedBlock = false;
+        const candidateDays = [...DAYS_OF_WEEK].sort((a, b) => {
+          const aUsed = usedDays.has(a) ? 1 : 0;
+          const bUsed = usedDays.has(b) ? 1 : 0;
+          return aUsed - bUsed;
+        });
+
+        for (const day of candidateDays) {
+          if (placedBlock) break;
+          const periodOrder = Array.from({ length: maxP }, (_, i) => i + 1);
+
+          for (const startP of periodOrder) {
+            if (startP + blockLen - 1 > maxP) continue;
+            let canFit = true;
+            for (let offset = 0; offset < blockLen; offset++) {
+              if (nextSlots[`${day}_${startP + offset}`]) {
+                canFit = false;
+                break;
+              }
+            }
+            if (canFit) {
+              for (let offset = 0; offset < blockLen; offset++) {
+                const p = startP + offset;
+                nextSlots[`${day}_${p}`] = {
+                  subject: cleanSubject,
+                  teacher: cleanTeacher,
+                  assistantTeacher: cleanAssistant || cls.defaultAssistant,
+                  room: payload.room || cls.room,
+                  groupName:
+                    blockLen >= 2
+                      ? `${payload.groupLabel} (Séance double)`
+                      : payload.groupLabel,
+                  jointWithClasses: jointClassNames
+                    ? jointClassNames.filter((n) => n !== cls.name)
+                    : undefined,
+                };
+              }
+              usedDays.add(day);
+              placedBlock = true;
+              break;
+            }
+          }
+        }
+      }
+
+      return {
+        ...cls,
+        slots: nextSlots,
+        subjectLoads: {
+          ...(cls.subjectLoads || {}),
+          [cleanSubject]: totalWeekly,
+        },
+      };
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+    appendAuditLog(
+      `Contrat Leçon aSc (${cleanSubject})`,
+      `${cleanTeacher}${
+        cleanAssistant ? ` + Ass. ${cleanAssistant}` : ''
+      } · Format ${payload.periodsPattern} (${totalWeekly}p/sem) sur ${
+        payload.classIds.length
+      } classe(s).`
+    );
+    await triggerRealtimeNotification(
+      `Contrat Leçon aSc créé : ${cleanSubject}`,
+      `${cleanTeacher}${
+        cleanAssistant ? ` + Ass. ${cleanAssistant}` : ''
+      } (${payload.periodsPattern} = ${totalWeekly}p/sem) appliqué à ${
+        payload.classIds.length
+      } classe(s).`,
+      'schedule_updated',
+      cleanTeacher
+    );
+  };
+
+  const handleLockOrUnlockAllClasses = (lock: boolean) => {
+    if (!lock) {
+      setLockedSlotsByClass({});
+      appendAuditLog(
+        'Déverrouillage Global aSc',
+        'Toutes les séances de toutes les classes ont été déverrouillées.'
+      );
+      return;
+    }
+    const nextLocks: Record<string, string[]> = {};
+    for (const cls of classes) {
+      nextLocks[cls.id] = Object.keys(cls.slots);
+    }
+    setLockedSlotsByClass(nextLocks);
+    appendAuditLog(
+      'Verrouillage Global aSc',
+      'Toutes les séances placées ont été verrouillées contre la modification.'
     );
   };
 
@@ -2772,6 +3136,49 @@ export default function App() {
           </button>
         </div>
       )}
+
+      {/* =====================================================================
+          aSc TIMETABLES RIBBON BAR & INTERACTIVE DIALOGS (Constraints, Horaires, Breaks, Assistant, All Settings)
+         ===================================================================== */}
+      <AscTimetablesRibbonAndDialogs
+        activeModal={activeAscModal}
+        onOpenModal={setActiveAscModal}
+        classes={classes}
+        teachers={teachers}
+        subjectConfigs={subjectConfigs}
+        constraints={constraints}
+        bellScheduleGroups={bellScheduleGroups}
+        selectedCategory={selectedCategory}
+        schoolYear={schoolYear}
+        scenario={scenario}
+        onChangeSchoolYear={setSchoolYear}
+        onChangeScenario={setScenario}
+        onUpdateConstraints={setConstraints}
+        onUpdateBellScheduleGroups={setBellScheduleGroups}
+        onUpdateTeacherTimeOff={handleUpdateTeacherTimeOff}
+        onUpdateClassTimeOff={handleUpdateClassTimeOff}
+        onAssignAssistantToClassOrSubject={handleAssignAssistantToClassOrSubject}
+        onRemoveAssistantFromClassOrSubject={
+          handleRemoveAssistantFromClassOrSubject
+        }
+        onCreateAscLessonContract={handleCreateAscLessonContract}
+        onLockOrUnlockAllClasses={handleLockOrUnlockAllClasses}
+        onRunAutoCompleteAndOptimize={() =>
+          handleAutoCompleteAllClassesSchedules(selectedCategory)
+        }
+        onSwitchToTab={(tab, subMode) => {
+          setActiveTab(tab);
+          if (subMode) setEditorSubMode(subMode);
+        }}
+        onPrintReport={(mode) => {
+          if (mode === 'ensemble') {
+            handlePrintEnsembleMatrix();
+          } else {
+            handlePrintLoadReport(mode);
+          }
+        }}
+        darkMode={darkMode}
+      />
 
       {/* =====================================================================
           MAIN WORKSPACE CONTENT
@@ -4853,25 +5260,46 @@ export default function App() {
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Enseignant principal
-                </label>
-                <input
-                  type="text"
-                  list="alkawthar-teachers-list"
-                  value={editingCell.teacher}
-                  onChange={(e) =>
-                    setEditingCell({ ...editingCell, teacher: e.target.value })
-                  }
-                  placeholder="Sélectionner ou saisir un enseignant..."
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-md focus:outline-none focus:border-sky-600"
-                />
-                <datalist id="alkawthar-teachers-list">
-                  {teachers.map((t) => (
-                    <option key={t.id} value={t.name} />
-                  ))}
-                </datalist>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Enseignant principal
+                  </label>
+                  <input
+                    type="text"
+                    list="alkawthar-teachers-list"
+                    value={editingCell.teacher}
+                    onChange={(e) =>
+                      setEditingCell({ ...editingCell, teacher: e.target.value })
+                    }
+                    placeholder="Sélectionner ou saisir un enseignant..."
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-md focus:outline-none focus:border-sky-600"
+                  />
+                  <datalist id="alkawthar-teachers-list">
+                    {teachers.map((t) => (
+                      <option key={t.id} value={t.name} />
+                    ))}
+                  </datalist>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-fuchsia-800 mb-1">
+                    + Enseignant(e) Assistant(e) avec lui/elle
+                  </label>
+                  <input
+                    type="text"
+                    list="alkawthar-teachers-list"
+                    value={editingCell.assistantTeacher}
+                    onChange={(e) =>
+                      setEditingCell({
+                        ...editingCell,
+                        assistantTeacher: e.target.value,
+                      })
+                    }
+                    placeholder="Ex: Assistante Zineb, Hanan..."
+                    className="w-full px-3 py-2 text-xs border border-fuchsia-300 bg-fuchsia-50/40 text-fuchsia-950 font-semibold rounded-md focus:outline-none focus:border-fuchsia-600"
+                  />
+                </div>
               </div>
 
               <div>
@@ -4885,7 +5313,7 @@ export default function App() {
                   onChange={(e) =>
                     setEditingCell({ ...editingCell, room: e.target.value })
                   }
-                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-md focus:outline-none focus:border-sky-600"
+                   className="w-full px-3 py-2 text-xs border border-slate-300 rounded-md focus:outline-none focus:border-sky-600"
                 />
                 <datalist id="alkawthar-rooms-list">
                   {rooms.map((r) => (
@@ -4923,7 +5351,7 @@ export default function App() {
                 </div>
 
                 <span className="block text-[11px] font-semibold text-amber-800 pt-1">
-                  Optionnel : Séance Intercalée / Co-enseignement (2 profs ou 2 demi-groupes)
+                  Optionnel : Séance Intercalée / Demi-groupe (2e matière en parallèle)
                 </span>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -4945,7 +5373,7 @@ export default function App() {
                   </div>
                   <div>
                     <label className="block text-[11px] text-slate-600 mb-1">
-                      2e Enseignant (Co-prof)
+                      2e Enseignant (Intercalé)
                     </label>
                     <input
                       type="text"
@@ -4972,6 +5400,7 @@ export default function App() {
                       ...editingCell,
                       subject: '',
                       teacher: '',
+                      assistantTeacher: '',
                       subSubject: '',
                       subTeacher: '',
                       jointWithClassName: '',

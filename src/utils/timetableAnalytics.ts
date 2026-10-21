@@ -695,6 +695,8 @@ export interface TeacherLoadLineItem {
   subject: string;
   periods: number;
   isJointOrGrouped: boolean;
+  assistantTeacher?: string; // Assistant(e) associé(e) à cet enseignant sur ces séances
+  roleInLine?: 'principal' | 'assistant';
 }
 
 export interface TeacherLoadRow {
@@ -848,8 +850,11 @@ export function computeTeachersLoadReport(
           const matchPrimary = teacherMatchesSlot(t.name, slot.teacher);
           const matchSub =
             slot.subTeacher && teacherMatchesSlot(t.name, slot.subTeacher);
+          const matchAssistant =
+            slot.assistantTeacher &&
+            teacherMatchesSlot(t.name, slot.assistantTeacher);
 
-          if (matchPrimary || matchSub) {
+          if (matchPrimary || matchSub || matchAssistant) {
             const subj = matchPrimary
               ? slot.subject
               : slot.subSubject || slot.subject;
@@ -860,6 +865,7 @@ export function computeTeachersLoadReport(
               slot.jointWithClasses && slot.jointWithClasses.length > 0;
             const isCoOrSplit =
               Boolean(slot.subSubject && slot.subTeacher) ||
+              Boolean(slot.assistantTeacher) ||
               slot.teacher.includes('/') ||
               slot.teacher.includes('&') ||
               slot.teacher.includes('+');
@@ -872,9 +878,16 @@ export function computeTeachersLoadReport(
               ? [cls.name, ...(slot.jointWithClasses || [])].join(',')
               : cls.name;
 
+            const assistantName =
+              slot.assistantTeacher || cls.defaultAssistant || undefined;
+
             const groupLabel =
               slot.groupName ||
-              (hasJointAttr
+              (matchAssistant
+                ? `Assistant(e) avec ${slot.teacher}`
+                : assistantName
+                ? `Classe complète (+ Ass. ${assistantName})`
+                : hasJointAttr
                 ? [cls.name, ...(slot.jointWithClasses || [])]
                     .map(() => 'Classe complète')
                     .join(',')
@@ -957,6 +970,7 @@ export interface ClassLoadLineItem {
   className: string;
   subject: string;
   teacher: string;
+  assistantTeacher?: string;
   groupLabel: string;
   periods: number;
   isCoTaughtOrSplit: boolean;
@@ -968,6 +982,7 @@ export interface ClassLoadBlock {
   section: SectionType;
   category: Exclude<SchoolCategory, 'ALL'>;
   categoryLabel: string;
+  defaultAssistant?: string;
   room: string;
   totalPeriods: number;
   targetWeeklyCapacity: number; // e.g. 30 for KG, 35 for KG3/GS, 40 for Primary/Secondary
@@ -977,7 +992,7 @@ export interface ClassLoadBlock {
 /**
  * Computes the Class Load Report matching Image 2 ("Load Classes"):
  * For each class, lists every subject taught in that class, followed by the teacher(s)
- * of that subject, the group, the weekly periods, and the total sum of periods for the class.
+ * and assistant teacher of that subject, the group, the weekly periods, and the total sum of periods for the class.
  */
 export function computeClassesLoadReport(
   classes: SchoolClass[],
@@ -996,6 +1011,7 @@ export function computeClassesLoadReport(
         {
           subject: string;
           teachersSet: Set<string>;
+          assistantTeacher?: string;
           groupLabel: string;
           periods: number;
           isCoTaughtOrSplit: boolean;
@@ -1020,8 +1036,12 @@ export function computeClassesLoadReport(
             ? `${slot.teacher.trim()}, ${slot.subTeacher.trim()}`
             : slot.teacher.trim();
 
+        const effectiveAssistant =
+          slot.assistantTeacher?.trim() || cls.defaultAssistant?.trim() || undefined;
+
         const isCoOrSplit =
           Boolean(slot.subTeacher && slot.subTeacher.trim()) ||
+          Boolean(effectiveAssistant) ||
           teacherLabel.includes('&') ||
           teacherLabel.includes('/') ||
           teacherLabel.includes('+') ||
@@ -1040,6 +1060,7 @@ export function computeClassesLoadReport(
           itemsMap.set(sKey, {
             subject: subj,
             teachersSet: new Set([teacherLabel]),
+            assistantTeacher: effectiveAssistant,
             groupLabel: grpLabel,
             periods: 0,
             isCoTaughtOrSplit: isCoOrSplit,
@@ -1047,6 +1068,9 @@ export function computeClassesLoadReport(
         } else {
           const existing = itemsMap.get(sKey)!;
           existing.teachersSet.add(teacherLabel);
+          if (effectiveAssistant && !existing.assistantTeacher) {
+            existing.assistantTeacher = effectiveAssistant;
+          }
           if (isCoOrSplit) existing.isCoTaughtOrSplit = true;
         }
         itemsMap.get(sKey)!.periods += 1;
@@ -1060,6 +1084,7 @@ export function computeClassesLoadReport(
             itemsMap.set(sKey, {
               subject: sName.trim(),
               teachersSet: new Set(['À affecter']),
+              assistantTeacher: cls.defaultAssistant,
               groupLabel: 'Classe complète',
               periods: targetP,
               isCoTaughtOrSplit: false,
@@ -1076,6 +1101,7 @@ export function computeClassesLoadReport(
           className: cls.name,
           subject: val.subject,
           teacher: Array.from(val.teachersSet).join(', '),
+          assistantTeacher: val.assistantTeacher,
           groupLabel: val.groupLabel,
           periods: val.periods,
           isCoTaughtOrSplit: val.isCoTaughtOrSplit,
@@ -1088,6 +1114,7 @@ export function computeClassesLoadReport(
         section: cls.section,
         category: cat,
         categoryLabel: CATEGORY_SHORT_LABELS[cat],
+        defaultAssistant: cls.defaultAssistant,
         room: cls.room,
         totalPeriods,
         targetWeeklyCapacity,

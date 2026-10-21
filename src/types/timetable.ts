@@ -21,6 +21,7 @@ export interface BellRow {
   label: string;
   time: string;
   durationMinutes?: number;
+  supervisorTeacher?: string; // Surveillance de récréation / pause (Enseignant ou Assistant)
 }
 
 export interface BellScheduleGroup {
@@ -37,6 +38,7 @@ export interface BellScheduleGroup {
 export interface LessonSlot {
   subject: string;
   teacher: string;
+  assistantTeacher?: string; // Enseignant Assistant(e) / AT avec l'enseignant principal au même créneau
   subSubject?: string;
   subTeacher?: string;
   room?: string;
@@ -52,10 +54,12 @@ export interface SchoolClass {
   section: SectionType;
   category?: Exclude<SchoolCategory, 'ALL'>;
   timingGroupId?: string;
+  defaultAssistant?: string; // Assistant(e) de classe attitré(e) (ex: Maternelle / Primaire)
   room: string;
   visibility: 'school';
   slots: Record<string, LessonSlot>; // key format: "${DayOfWeek}_${periodNumber}"
   subjectLoads?: Record<string, number>; // optional explicit target weekly periods per subject
+  unavailableSlots?: string[]; // Temps libre classe (Time-off)
   updatedBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -67,8 +71,12 @@ export interface TeacherProfile {
   subjects: string[];
   section: string;
   category?: Exclude<SchoolCategory, 'ALL'>;
+  isAssistant?: boolean; // Indique si le profil peut agir comme Assistant(e) / Co-enseignant
   maxPeriodsPerWeek: number;
-  unavailableSlots: string[]; // format: "${DayOfWeek}_${periodNumber}"
+  maxPeriodsPerDay?: number;
+  maxConsecutivePeriods?: number;
+  unavailableSlots: string[]; // format: "${DayOfWeek}_${periodNumber}" (Rouge X dans aSc)
+  questionableSlots?: string[]; // format: "${DayOfWeek}_${periodNumber}" (Jaune ? dans aSc)
   defaultAssigned: boolean;
   visibility: 'school';
   updatedBy: string;

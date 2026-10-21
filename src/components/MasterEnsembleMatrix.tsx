@@ -727,6 +727,9 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                 {showTeacherSubtext && !slot.subSubject && (
                                   <div className="text-[8.5px] font-medium opacity-85 truncate w-full mt-0.5">
                                     {slot.teacher}
+                                    {slot.assistantTeacher
+                                      ? ` +Ass.${slot.assistantTeacher}`
+                                      : ''}
                                   </div>
                                 )}
                               </div>
@@ -792,6 +795,11 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                     Enseignant :{' '}
                     <strong>{activeSourceSlot?.teacher || 'Aucun'}</strong>
                   </span>
+                  {activeSourceSlot?.assistantTeacher && (
+                    <span className="px-1.5 py-0.5 rounded bg-teal-600/80 text-white font-bold text-[10px]">
+                      + Assistant(e) : {activeSourceSlot.assistantTeacher}
+                    </span>
+                  )}
                   {activeSourceSlot?.subTeacher && (
                     <span>
                       · 2e Prof (Intercalé) :{' '}
