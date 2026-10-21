@@ -7,6 +7,14 @@ export type SectionType =
   | 'Secondary_Girls'
   | 'Secondary_Boys';
 
+export type SchoolCategory =
+  | 'ALL'
+  | 'French_Section'
+  | 'Boys_Section'
+  | 'Girls_Section'
+  | 'American_Section'
+  | 'KG_Primary';
+
 export interface BellRow {
   type: 'period' | 'break';
   periodNumber?: number;
@@ -20,15 +28,20 @@ export interface LessonSlot {
   subSubject?: string;
   subTeacher?: string;
   room?: string;
+  jointWithClasses?: string[]; // Classes assembled together at the same period
+  isIntercalated?: boolean; // Marked if split/interleaved or overlapping bell schedule
+  intercalatedNote?: string;
 }
 
 export interface SchoolClass {
   id: string;
   name: string;
   section: SectionType;
+  category?: Exclude<SchoolCategory, 'ALL'>;
   room: string;
   visibility: 'school';
   slots: Record<string, LessonSlot>; // key format: "${DayOfWeek}_${periodNumber}"
+  subjectLoads?: Record<string, number>; // optional explicit target weekly periods per subject
   updatedBy: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -39,6 +52,7 @@ export interface TeacherProfile {
   name: string;
   subjects: string[];
   section: string;
+  category?: Exclude<SchoolCategory, 'ALL'>;
   maxPeriodsPerWeek: number;
   unavailableSlots: string[]; // format: "${DayOfWeek}_${periodNumber}"
   defaultAssigned: boolean;
@@ -50,12 +64,25 @@ export interface TeacherProfile {
 
 export interface ScheduleConflict {
   id: string;
-  type: 'double_booking' | 'unavailable_slot' | 'overload';
+  type: 'double_booking' | 'unavailable_slot' | 'overload' | 'intercalated_bell';
   severity: 'critical' | 'warning';
   teacher: string;
   day: DayOfWeek;
   period: number;
   classesInvolved: string[];
+  description: string;
+}
+
+export interface IntercalatedSessionInfo {
+  id: string;
+  kind: 'split_group' | 'joint_classes' | 'cross_section_bell_overlap';
+  day: DayOfWeek;
+  period: number;
+  classNames: string[];
+  teachers: string[];
+  subjects: string[];
+  timeWindowA: string;
+  timeWindowB?: string;
   description: string;
 }
 

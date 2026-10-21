@@ -264,17 +264,23 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
 
                         {cell ? (
                           hasSplit ? (
-                            <div className="grid grid-cols-2 h-[62px] divide-x divide-slate-800">
-                              <div className="flex flex-col justify-between p-1.5 h-full">
-                                <div className="text-center font-bold text-xs text-slate-950 leading-tight mt-1">
+                            <div className="grid grid-cols-2 h-[62px] divide-x divide-slate-800 relative">
+                              <span
+                                title="Séance intercalée / 2 groupes ou 2 enseignants en simultané"
+                                className="absolute top-0.5 left-1 z-10 px-1 py-0.2 bg-amber-100 text-amber-900 border border-amber-300 rounded text-[9px] font-bold leading-none no-print"
+                              >
+                                ⇄ Intercalé
+                              </span>
+                              <div className="flex flex-col justify-between p-1.5 h-full pt-3.5">
+                                <div className="text-center font-bold text-xs text-slate-950 leading-tight">
                                   {cell.subject}
                                 </div>
                                 <div className="text-[10px] font-medium text-slate-800 text-right truncate">
                                   {cell.teacher}
                                 </div>
                               </div>
-                              <div className="flex flex-col justify-between p-1.5 h-full">
-                                <div className="text-center font-bold text-xs text-slate-950 leading-tight mt-1">
+                              <div className="flex flex-col justify-between p-1.5 h-full pt-3.5">
+                                <div className="text-center font-bold text-xs text-slate-950 leading-tight">
                                   {cell.subSubject}
                                 </div>
                                 <div className="text-[10px] font-medium text-slate-800 text-right truncate">
@@ -283,8 +289,25 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
                               </div>
                             </div>
                           ) : (
-                            <div className="flex flex-col justify-between px-2 py-1.5 h-[62px]">
-                              <div className="text-center font-bold text-[15px] text-slate-950 leading-snug mt-1 truncate">
+                            <div className="flex flex-col justify-between px-2 py-1.5 h-[62px] relative">
+                              {cell.jointWithClasses &&
+                                cell.jointWithClasses.length > 0 && (
+                                  <span
+                                    title={`Cours commun rassemblé avec : ${cell.jointWithClasses.join(
+                                      ', '
+                                    )}`}
+                                    className="absolute top-0.5 left-1 px-1 py-0.2 bg-indigo-100 text-indigo-900 border border-indigo-300 rounded text-[9px] font-bold leading-none"
+                                  >
+                                    ⊕ +{cell.jointWithClasses.join(', ')}
+                                  </span>
+                                )}
+                              <div
+                                className={`text-center font-bold text-[15px] text-slate-950 leading-snug truncate ${
+                                  cell.jointWithClasses?.length
+                                    ? 'mt-2.5'
+                                    : 'mt-1'
+                                }`}
+                              >
                                 {cell.subject}
                               </div>
                               <div className="flex items-center justify-between gap-1">

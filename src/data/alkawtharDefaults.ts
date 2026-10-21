@@ -3534,7 +3534,10 @@ export function teacherMatchesSlot(teacherName: string, slotTeacher: string): bo
   if (slotTeacher.trim().toLowerCase() === teacherName.trim().toLowerCase()) {
     return true;
   }
-  const parts = slotTeacher.split('/').map((s) => s.trim().toLowerCase());
+  const parts = slotTeacher
+    .split(/[\/&+]/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
   return parts.includes(teacherName.trim().toLowerCase());
 }
 
@@ -3563,16 +3566,28 @@ export function buildTeacherTimetable(
         if (!slots[key]) {
           slots[key] = {
             subject: subj,
-            teacher: cls.name,
-            room: cls.room,
+            teacher: slot.jointWithClasses?.length
+              ? `${cls.name} + ${slot.jointWithClasses.join(' + ')}`
+              : cls.name,
+            room: slot.room || cls.room,
+            jointWithClasses: slot.jointWithClasses,
+            isIntercalated: slot.isIntercalated || Boolean(slot.subSubject && slot.subTeacher),
           };
         } else {
-          // Multiple classes in the same period -> show both for visibility
-          slots[key] = {
-            ...slots[key],
-            subSubject: subj,
-            subTeacher: cls.name,
-          };
+          // If it's an intentional joint class, merge class names cleanly without counting twice in display
+          const isJoint = slot.jointWithClasses?.some(
+            (jc) => jc.toLowerCase() === slots[key].teacher.toLowerCase()
+          );
+          if (isJoint) {
+            totalPeriods = Math.max(1, totalPeriods - 1); // Joint class is 1 period of teaching load
+          } else {
+            slots[key] = {
+              ...slots[key],
+              subSubject: subj,
+              subTeacher: cls.name,
+              isIntercalated: true,
+            };
+          }
         }
       }
     }
@@ -3593,8 +3608,17 @@ export function detectScheduleConflicts(
   const teacherByName = new Map<string, TeacherProfile>();
   teachers.forEach((t) => teacherByName.set(t.name.toLowerCase(), t));
 
-  // Track (teacherName, day_period) -> list of class names
-  const occupancy = new Map<string, { teacher: string; day: DayOfWeek; period: number; classes: string[] }>();
+  // Track (teacherName, day_period) -> list of { className, jointWithClasses }
+  const occupancy = new Map<
+    string,
+    {
+      teacher: string;
+      day: DayOfWeek;
+      period: number;
+      classes: string[];
+      jointPairs: Set<string>;
+    }
+  >();
 
   for (const cls of classes) {
     for (const [key, slot] of Object.entries(cls.slots)) {
@@ -3608,9 +3632,24 @@ export function detectScheduleConflicts(
         if (!clean) return;
         const occKey = `${clean.toLowerCase()}__${key}`;
         if (!occupancy.has(occKey)) {
-          occupancy.set(occKey, { teacher: clean, day, period, classes: [] });
+          occupancy.set(occKey, {
+            teacher: clean,
+            day,
+            period,
+            classes: [],
+            jointPairs: new Set(),
+          });
         }
-        occupancy.get(occKey)!.classes.push(cls.name);
+        const entry = occupancy.get(occKey)!;
+        entry.classes.push(cls.name);
+        if (slot.jointWithClasses?.length) {
+          for (const jc of slot.jointWithClasses) {
+            const pairKey = [cls.name.toLowerCase(), jc.toLowerCase()]
+              .sort()
+              .join('::');
+            entry.jointPairs.add(pairKey);
+          }
+        }
 
         // Check teacher unavailability
         const profile = teacherByName.get(clean.toLowerCase());
@@ -3635,7 +3674,21 @@ export function detectScheduleConflicts(
 
   for (const [occKey, item] of occupancy.entries()) {
     if (item.classes.length > 1) {
-      // Ignore co-teaching Montessori or shared KG assistants if same group, or flag as warning/conflict
+      // Check if all classes in this slot are intentionally assembled together (jointWithClasses)
+      let allIntentionallyJoint = false;
+      if (item.classes.length === 2) {
+        const pairKey = [
+          item.classes[0].toLowerCase(),
+          item.classes[1].toLowerCase(),
+        ]
+          .sort()
+          .join('::');
+        if (item.jointPairs.has(pairKey)) {
+          allIntentionallyJoint = true;
+        }
+      }
+      if (allIntentionallyJoint) continue;
+
       const isSharedMontessori = item.teacher.includes('Fatimah');
       conflicts.push({
         id: `dbl_${occKey}`,

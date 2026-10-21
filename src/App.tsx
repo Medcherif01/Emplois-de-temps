@@ -17,6 +17,7 @@ import {
   AlertTriangle,
   BarChart3,
   Bell,
+  BookOpen,
   Building2,
   Calendar,
   Check,
@@ -29,6 +30,7 @@ import {
   Globe,
   History,
   Layers,
+  LayoutGrid,
   Lock,
   LogIn,
   LogOut,
@@ -72,6 +74,7 @@ import {
   LessonSlot,
   NotificationEntry,
   ScheduleConflict,
+  SchoolCategory,
   SchoolClass,
   SectionType,
   TeacherProfile,
@@ -80,6 +83,17 @@ import {
   generateStandaloneLandscapeHtml,
   LandscapeTimetableSheet,
 } from './components/LandscapeTimetableSheet';
+import { MasterEnsembleMatrix } from './components/MasterEnsembleMatrix';
+import { LoadsAndManagementWorkspace } from './components/LoadsAndManagementWorkspace';
+import {
+  CATEGORY_SHORT_LABELS,
+  classMatchesCategory,
+  computeSubjectsLoadReport,
+  computeTeachersLoadReport,
+  generatePrintableEnsembleHtml,
+  generatePrintableLoadReportHtml,
+  teacherMatchesCategory,
+} from './utils/timetableAnalytics';
 import {
   CsvValidationIssue,
   generateExcelCsvExport,
@@ -137,27 +151,27 @@ const I18N: Record<
   }
 > = {
   fr: {
-    navEditor: 'Éditeur Visuel',
-    navTeachers: 'Enseignants & Remplacements',
+    navEditor: 'Vue Ensemble & Éditeur',
+    navTeachers: 'Matières, Enseignants & Loads',
     navAiCsp: 'Moteur CSP & IA',
-    navResources: 'Salles & Matières',
-    navReports: 'Rapports, Import & PDF',
+    navResources: 'Salles & Horaires',
+    navReports: 'Rapports, Load & PDF',
     printPdfBtn: 'Imprimer PDF Paysage',
   },
   ar: {
-    navEditor: 'المحرر المرئي للجداول',
-    navTeachers: 'المعلمون والبدلاء',
+    navEditor: 'العرض الشامل والمحرر',
+    navTeachers: 'المواد والمعلمون والنصاب',
     navAiCsp: 'محرك القيود والذكاء الاصطناعي',
-    navResources: 'القاعات والمواد',
+    navResources: 'القاعات والمواقيت',
     navReports: 'التقارير والطباعة PDF',
     printPdfBtn: 'طباعة PDF أفقي',
   },
   en: {
-    navEditor: 'Visual Editor',
-    navTeachers: 'Teachers & Substitutes',
+    navEditor: 'Ensemble View & Editor',
+    navTeachers: 'Subjects, Teachers & Loads',
     navAiCsp: 'CSP Engine & AI',
-    navResources: 'Rooms & Subjects',
-    navReports: 'Reports, Import & PDF',
+    navResources: 'Rooms & Timings',
+    navReports: 'Reports, Load & PDF',
     printPdfBtn: 'Print Landscape PDF',
   },
 };
@@ -168,6 +182,11 @@ export default function App() {
   const [darkMode, setDarkMode] = useState(false);
   const [roleMode, setRoleMode] = useState<UserRole>('admin');
   const [activeTab, setActiveTab] = useState<ActiveTab>('editor');
+  const [editorSubMode, setEditorSubMode] = useState<
+    'ensemble' | 'single' | 'loads'
+  >('ensemble');
+  const [selectedCategory, setSelectedCategory] =
+    useState<SchoolCategory>('ALL');
   const [selectedCampus, setSelectedCampus] = useState(
     'Al-Kawthar — Campus Principal Jeddah'
   );
@@ -225,9 +244,9 @@ export default function App() {
     useState<string>('Maths');
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Sub-tabs inside Teachers Module
+  // Sub-tabs inside Teachers & Loads Module
   const [teacherSubTab, setTeacherSubTab] = useState<
-    'directory' | 'availability' | 'substitutes'
+    'directory' | 'loads_subjects' | 'availability' | 'substitutes'
   >('directory');
 
   // Substitute / Absence Finder State
@@ -319,6 +338,7 @@ export default function App() {
     subSubject: string;
     subTeacher: string;
     room: string;
+    jointWithClassName: string;
   } | null>(null);
 
   const appendAuditLog = (action: string, details: string) => {
@@ -777,6 +797,7 @@ export default function App() {
     return classes.filter((c) => {
       if (selectedSection !== 'ALL' && c.section !== selectedSection)
         return false;
+      if (!classMatchesCategory(c, selectedCategory)) return false;
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase();
       if (c.name.toLowerCase().includes(q)) return true;
@@ -786,10 +807,11 @@ export default function App() {
           s.teacher.toLowerCase().includes(q)
       );
     });
-  }, [classes, selectedSection, searchQuery]);
+  }, [classes, selectedSection, selectedCategory, searchQuery]);
 
   const filteredTeachers = useMemo(() => {
     return teachers.filter((t) => {
+      if (!teacherMatchesCategory(t, selectedCategory, classes)) return false;
       if (!searchQuery.trim()) return true;
       const q = searchQuery.toLowerCase();
       return (
@@ -798,7 +820,7 @@ export default function App() {
         t.section.toLowerCase().includes(q)
       );
     });
-  }, [teachers, searchQuery]);
+  }, [teachers, classes, selectedCategory, searchQuery]);
 
   // Drag & Drop Slot Swap Handler in Visual Editor
   const handleDragDropSlotSwap = async (fromKey: string, toKey: string) => {
@@ -849,6 +871,59 @@ export default function App() {
     );
   };
 
+  // Intelligent Switch Handler inside Vue Ensemble (Any Class)
+  const handleSwitchSlotsInAnyClass = async (
+    classId: string,
+    fromKey: string,
+    toKey: string
+  ) => {
+    const targetCls = classes.find((c) => c.id === classId);
+    if (!targetCls) return;
+    const locked = new Set(lockedSlotsByClass[classId] || []);
+    if (locked.has(fromKey) || locked.has(toKey)) {
+      await triggerRealtimeNotification(
+        'Switch refusé (Séance verrouillée)',
+        `Le créneau ${fromKey} ou ${toKey} est verrouillé en ${targetCls.name}.`,
+        'schedule_updated',
+        'all'
+      );
+      return;
+    }
+
+    const nextSlots = { ...targetCls.slots };
+    const slotA = nextSlots[fromKey];
+    const slotB = nextSlots[toKey];
+    if (!slotA && !slotB) return;
+
+    if (slotA && slotB) {
+      nextSlots[fromKey] = slotB;
+      nextSlots[toKey] = slotA;
+    } else if (slotA && !slotB) {
+      nextSlots[toKey] = slotA;
+      delete nextSlots[fromKey];
+    } else if (!slotA && slotB) {
+      nextSlots[fromKey] = slotB;
+      delete nextSlots[toKey];
+    }
+
+    await saveClassToStore({ ...targetCls, slots: nextSlots }, [fromKey, toKey]);
+    appendAuditLog(
+      `Switch Intelligent (${targetCls.name})`,
+      `Permutation ${fromKey} (${slotA?.subject || 'Libre'}) ↔ ${toKey} (${
+        slotB?.subject || 'Libre'
+      })`
+    );
+    await triggerRealtimeNotification(
+      `Switch Intelligent : ${targetCls.name}`,
+      `${slotA?.subject || 'Libre'} (${fromKey.replace(
+        '_',
+        ' P'
+      )}) ↔ ${slotB?.subject || 'Libre'} (${toKey.replace('_', ' P')}).`,
+      'schedule_updated',
+      slotA?.teacher || slotB?.teacher || 'all'
+    );
+  };
+
   // Toggle Lock on a Slot
   const handleToggleLockSlot = (slotKey: string) => {
     setLockedSlotsByClass((prev) => {
@@ -873,25 +948,32 @@ export default function App() {
   const handleOpenSlotEditor = (
     day: DayOfWeek,
     period: number,
-    currentSlot?: LessonSlot
+    currentSlot?: LessonSlot,
+    overrideClassId?: string
   ) => {
+    const targetCls =
+      classes.find((c) => c.id === overrideClassId) || selectedClass;
+    const slotToUse = currentSlot || targetCls.slots[`${day}_${period}`];
     setEditingCell({
-      classId: selectedClass.id,
+      classId: targetCls.id,
       day,
       period,
-      subject: currentSlot?.subject || '',
-      teacher: currentSlot?.teacher || '',
-      subSubject: currentSlot?.subSubject || '',
-      subTeacher: currentSlot?.subTeacher || '',
-      room: currentSlot?.room || selectedClass.room,
+      subject: slotToUse?.subject || '',
+      teacher: slotToUse?.teacher || '',
+      subSubject: slotToUse?.subSubject || '',
+      subTeacher: slotToUse?.subTeacher || '',
+      room: slotToUse?.room || targetCls.room,
+      jointWithClassName: slotToUse?.jointWithClasses?.[0] || '',
     });
   };
 
   const handleSaveSlotEdit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingCell) return;
+    const targetCls =
+      classes.find((c) => c.id === editingCell.classId) || selectedClass;
     const key = `${editingCell.day}_${editingCell.period}`;
-    const newSlots = { ...selectedClass.slots };
+    const newSlots = { ...targetCls.slots };
 
     if (!editingCell.subject.trim() || !editingCell.teacher.trim()) {
       delete newSlots[key];
@@ -899,33 +981,489 @@ export default function App() {
       const updatedSlot: LessonSlot = {
         subject: editingCell.subject.trim(),
         teacher: editingCell.teacher.trim(),
-        room: editingCell.room.trim() || selectedClass.room,
+        room: editingCell.room.trim() || targetCls.room,
       };
       if (editingCell.subSubject.trim() && editingCell.subTeacher.trim()) {
         updatedSlot.subSubject = editingCell.subSubject.trim();
         updatedSlot.subTeacher = editingCell.subTeacher.trim();
+        updatedSlot.isIntercalated = true;
+      }
+      if (editingCell.jointWithClassName.trim()) {
+        updatedSlot.jointWithClasses = [editingCell.jointWithClassName.trim()];
       }
       newSlots[key] = updatedSlot;
     }
 
     const updatedClass: SchoolClass = {
-      ...selectedClass,
+      ...targetCls,
       slots: newSlots,
     };
 
+    // If jointWithClassName is specified, mirror the joint session into the partner class
+    if (
+      editingCell.jointWithClassName.trim() &&
+      editingCell.subject.trim() &&
+      editingCell.teacher.trim()
+    ) {
+      const partnerCls = classes.find(
+        (c) =>
+          c.name.toLowerCase() ===
+          editingCell.jointWithClassName.trim().toLowerCase()
+      );
+      if (partnerCls && partnerCls.id !== targetCls.id) {
+        const partnerSlots = {
+          ...partnerCls.slots,
+          [key]: {
+            subject: editingCell.subject.trim(),
+            teacher: editingCell.teacher.trim(),
+            room: editingCell.room.trim() || targetCls.room,
+            jointWithClasses: [targetCls.name],
+          },
+        };
+        const nextAll = classes.map((c) => {
+          if (c.id === targetCls.id) return updatedClass;
+          if (c.id === partnerCls.id) return { ...partnerCls, slots: partnerSlots };
+          return c;
+        });
+        recordHistoryAndSetClasses(nextAll);
+      } else {
+        await saveClassToStore(updatedClass, [key]);
+      }
+    } else {
+      await saveClassToStore(updatedClass, [key]);
+    }
+
     setEditingCell(null);
-    await saveClassToStore(updatedClass, [key]);
     appendAuditLog(
-      `Modification manuelle (${selectedClass.name})`,
+      `Modification manuelle (${targetCls.name})`,
       `${key} : ${editingCell.subject} (${editingCell.teacher})`
     );
     await triggerRealtimeNotification(
-      `Modification : ${selectedClass.name} (${editingCell.day} P${editingCell.period})`,
+      `Modification : ${targetCls.name} (${editingCell.day} P${editingCell.period})`,
       editingCell.subject.trim()
-        ? `Cours "${editingCell.subject}" attribué à ${editingCell.teacher} en ${selectedClass.name}.`
-        : `Créneau ${editingCell.day} P${editingCell.period} libéré en ${selectedClass.name}.`,
+        ? `Cours "${editingCell.subject}" attribué à ${editingCell.teacher} en ${targetCls.name}.`
+        : `Créneau ${editingCell.day} P${editingCell.period} libéré en ${targetCls.name}.`,
       'schedule_updated',
       editingCell.teacher || 'all'
+    );
+  };
+
+  // Add Subject Associated with One or Multiple Classes + Auto-Schedule Load
+  const handleAddSubjectWithClasses = async (payload: {
+    subjectName: string;
+    category: Exclude<SchoolCategory, 'ALL'>;
+    weeklyPeriods: number;
+    durationMinutes: 30 | 40 | 45 | 50 | 60;
+    weight: number;
+    preferMorning: boolean;
+    teacherName: string;
+    subTeacherName?: string;
+    targetClassIds: string[];
+    autoScheduleInClasses: boolean;
+  }) => {
+    const cleanSubject = payload.subjectName.trim();
+    const cleanTeacher = payload.teacherName.trim() || 'À affecter';
+    if (!cleanSubject || payload.targetClassIds.length === 0) return;
+
+    setSubjectConfigs((prev) => {
+      const exists = prev.some(
+        (s) => s.name.toLowerCase() === cleanSubject.toLowerCase()
+      );
+      if (exists) return prev;
+      return [
+        ...prev,
+        {
+          id: `sub_${Date.now()}`,
+          name: cleanSubject,
+          durationMinutes: payload.durationMinutes,
+          weight: payload.weight,
+          preferMorning: payload.preferMorning,
+          allowDoublePeriod: false,
+          maxPerDay: 2,
+          requiredRoomType: 'classroom',
+          sessionType: 'theorique',
+          weeklyPeriodsDefault: payload.weeklyPeriods,
+          category: payload.category,
+        },
+      ];
+    });
+
+    const nextClasses = classes.map((cls) => {
+      if (!payload.targetClassIds.includes(cls.id)) return cls;
+      const nextSlots = { ...cls.slots };
+      const nextLoads = {
+        ...(cls.subjectLoads || {}),
+        [cleanSubject]: payload.weeklyPeriods,
+      };
+
+      if (payload.autoScheduleInClasses) {
+        let currentCount = Object.values(nextSlots).filter(
+          (s) =>
+            s.subject.toLowerCase() === cleanSubject.toLowerCase() ||
+            s.subSubject?.toLowerCase() === cleanSubject.toLowerCase()
+        ).length;
+
+        const maxP =
+          cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+
+        for (const day of DAYS_OF_WEEK) {
+          for (let p = 1; p <= maxP; p++) {
+            if (currentCount >= payload.weeklyPeriods) break;
+            const k = `${day}_${p}`;
+            if (!nextSlots[k]) {
+              const slotObj: LessonSlot = {
+                subject: cleanSubject,
+                teacher: cleanTeacher,
+                room: cls.room,
+              };
+              if (payload.subTeacherName?.trim()) {
+                slotObj.subSubject = cleanSubject;
+                slotObj.subTeacher = payload.subTeacherName.trim();
+                slotObj.isIntercalated = true;
+              }
+              nextSlots[k] = slotObj;
+              currentCount++;
+            }
+          }
+        }
+      }
+
+      return {
+        ...cls,
+        slots: nextSlots,
+        subjectLoads: nextLoads,
+      };
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+    appendAuditLog(
+      `Ajout Matière Multi-Classes (${cleanSubject})`,
+      `${payload.weeklyPeriods}p/sem associé à ${payload.targetClassIds.length} classe(s) avec ${cleanTeacher}.`
+    );
+    await triggerRealtimeNotification(
+      `Matière associée : ${cleanSubject}`,
+      `${cleanSubject} (${payload.weeklyPeriods}p/sem) ajoutée à ${payload.targetClassIds.length} classe(s) avec ${cleanTeacher}.`,
+      'schedule_updated',
+      cleanTeacher
+    );
+  };
+
+  // Add New Teacher & Optionally Generate Initial Sessions
+  const handleAddNewTeacher = async (payload: {
+    name: string;
+    category: Exclude<SchoolCategory, 'ALL'>;
+    subjects: string[];
+    maxPeriodsPerWeek: number;
+    initialClassId?: string;
+    initialSubject?: string;
+    initialPeriods?: number;
+  }) => {
+    const cleanName = payload.name.trim();
+    if (!cleanName) return;
+
+    const sectionMap: Record<Exclude<SchoolCategory, 'ALL'>, string> = {
+      French_Section: 'Section Française',
+      Boys_Section: 'Boys Section',
+      Girls_Section: 'Girls Section',
+      American_Section: 'American Section',
+      KG_Primary: 'KG & Primary',
+    };
+
+    const newTeacher: TeacherProfile = {
+      id: `teacher_custom_${Date.now()}`,
+      name: cleanName,
+      subjects: payload.subjects.length > 0 ? payload.subjects : ['Général'],
+      section: sectionMap[payload.category] || 'Primary',
+      category: payload.category,
+      maxPeriodsPerWeek: payload.maxPeriodsPerWeek || 24,
+      unavailableSlots: [],
+      defaultAssigned: true,
+      visibility: 'school',
+      updatedBy: 'Direction',
+    };
+
+    await saveTeacherToStore(newTeacher);
+    setSelectedTeacherId(newTeacher.id);
+
+    if (
+      payload.initialClassId &&
+      payload.initialSubject &&
+      payload.initialPeriods &&
+      payload.initialPeriods > 0
+    ) {
+      const targetCls = classes.find((c) => c.id === payload.initialClassId);
+      if (targetCls) {
+        const nextSlots = { ...targetCls.slots };
+        const maxP =
+          targetCls.section === 'KG'
+            ? 6
+            : targetCls.section === 'KG3_GS'
+            ? 7
+            : 8;
+        let placed = 0;
+        for (const day of DAYS_OF_WEEK) {
+          for (let p = 1; p <= maxP; p++) {
+            if (placed >= payload.initialPeriods) break;
+            const k = `${day}_${p}`;
+            if (!nextSlots[k]) {
+              nextSlots[k] = {
+                subject: payload.initialSubject,
+                teacher: cleanName,
+                room: targetCls.room,
+              };
+              placed++;
+            }
+          }
+        }
+        await saveClassToStore({
+          ...targetCls,
+          slots: nextSlots,
+        });
+      }
+    }
+
+    appendAuditLog(
+      `Nouvel enseignant ajouté (${cleanName})`,
+      `Catégorie : ${payload.category} · Max : ${payload.maxPeriodsPerWeek}p/sem.`
+    );
+    await triggerRealtimeNotification(
+      `Enseignant(e) ajouté(e) : ${cleanName}`,
+      `Profil créé (${payload.subjects.join(', ')}) avec plafond de ${
+        payload.maxPeriodsPerWeek
+      }p/semaine.`,
+      'teacher_assigned',
+      cleanName
+    );
+  };
+
+  // Adjust Subject Load (+/- periods per week in a class)
+  const handleAdjustClassSubjectLoad = async (
+    classId: string,
+    subjectName: string,
+    delta: number,
+    preferredTeacher?: string
+  ) => {
+    const cls = classes.find((c) => c.id === classId);
+    if (!cls) return;
+    const nextSlots = { ...cls.slots };
+    const matchingKeys = Object.entries(nextSlots)
+      .filter(
+        ([, s]) => s.subject.toLowerCase() === subjectName.toLowerCase()
+      )
+      .map(([k]) => k);
+
+    const sampleTeacher =
+      preferredTeacher ||
+      (matchingKeys.length > 0
+        ? nextSlots[matchingKeys[0]].teacher
+        : teachers.find((t) =>
+            t.subjects.some(
+              (sub) => sub.toLowerCase() === subjectName.toLowerCase()
+            )
+          )?.name || 'Prof. Référent');
+
+    if (delta > 0) {
+      const maxP =
+        cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+      let added = 0;
+      for (const day of DAYS_OF_WEEK) {
+        for (let p = 1; p <= maxP; p++) {
+          if (added >= delta) break;
+          const k = `${day}_${p}`;
+          if (!nextSlots[k]) {
+            nextSlots[k] = {
+              subject: subjectName,
+              teacher: sampleTeacher,
+              room: cls.room,
+            };
+            added++;
+          }
+        }
+      }
+    } else if (delta < 0 && matchingKeys.length > 0) {
+      const toRemove = Math.min(Math.abs(delta), matchingKeys.length);
+      for (let i = 0; i < toRemove; i++) {
+        const keyToDelete = matchingKeys[matchingKeys.length - 1 - i];
+        delete nextSlots[keyToDelete];
+      }
+    }
+
+    const updatedCount = Object.values(nextSlots).filter(
+      (s) => s.subject.toLowerCase() === subjectName.toLowerCase()
+    ).length;
+
+    await saveClassToStore({
+      ...cls,
+      slots: nextSlots,
+      subjectLoads: {
+        ...(cls.subjectLoads || {}),
+        [subjectName]: updatedCount,
+      },
+    });
+
+    appendAuditLog(
+      `Modification Load (${cls.name})`,
+      `${subjectName} -> ${updatedCount}p/sem (${delta > 0 ? `+${delta}` : delta})`
+    );
+  };
+
+  // Assemble 2 Classes Together (Joint Course) OR 2 Teachers Together (Intercalated / Co-teaching)
+  const handleAssembleClassesOrTeachers = async (payload: {
+    mode: 'joint_classes' | 'co_teachers';
+    classAId: string;
+    classBId?: string;
+    day: DayOfWeek;
+    period: number;
+    subjectA: string;
+    teacherA: string;
+    subjectB?: string;
+    teacherB?: string;
+    room?: string;
+  }) => {
+    const clsA = classes.find((c) => c.id === payload.classAId);
+    if (!clsA) return;
+    const slotKey = `${payload.day}_${payload.period}`;
+
+    if (payload.mode === 'joint_classes' && payload.classBId) {
+      const clsB = classes.find((c) => c.id === payload.classBId);
+      if (!clsB) return;
+
+      const sharedRoom =
+        payload.room?.trim() || `${clsA.name} + ${clsB.name}`;
+
+      const nextAll = classes.map((c) => {
+        if (c.id === clsA.id) {
+          return {
+            ...c,
+            slots: {
+              ...c.slots,
+              [slotKey]: {
+                subject: payload.subjectA,
+                teacher: payload.teacherA,
+                room: sharedRoom,
+                jointWithClasses: [clsB.name],
+              },
+            },
+          };
+        }
+        if (c.id === clsB.id) {
+          return {
+            ...c,
+            slots: {
+              ...c.slots,
+              [slotKey]: {
+                subject: payload.subjectA,
+                teacher: payload.teacherA,
+                room: sharedRoom,
+                jointWithClasses: [clsA.name],
+              },
+            },
+          };
+        }
+        return c;
+      });
+
+      recordHistoryAndSetClasses(nextAll);
+      appendAuditLog(
+        `Classes rassemblées (${clsA.name} ⊕ ${clsB.name})`,
+        `${payload.day} P${payload.period} : ${payload.subjectA} avec ${payload.teacherA}`
+      );
+      await triggerRealtimeNotification(
+        `Classes rassemblées : ${clsA.name} ⊕ ${clsB.name}`,
+        `Cours commun de ${payload.subjectA} (${payload.teacherA}) programmé le ${payload.day} P${payload.period}.`,
+        'schedule_updated',
+        payload.teacherA
+      );
+    } else {
+      const nextSlots = {
+        ...clsA.slots,
+        [slotKey]: {
+          subject: payload.subjectA,
+          teacher: payload.teacherA,
+          subSubject: payload.subjectB || payload.subjectA,
+          subTeacher: payload.teacherB || '',
+          room: payload.room || clsA.room,
+          isIntercalated: true,
+        },
+      };
+
+      await saveClassToStore({ ...clsA, slots: nextSlots }, [slotKey]);
+      appendAuditLog(
+        `Séance intercalée / Co-enseignement (${clsA.name})`,
+        `${payload.day} P${payload.period} : ${payload.subjectA} (${payload.teacherA}) ⇄ ${
+          payload.subjectB || payload.subjectA
+        } (${payload.teacherB})`
+      );
+      await triggerRealtimeNotification(
+        `Séance intercalée : ${clsA.name} (${payload.day} P${payload.period})`,
+        `${payload.teacherA} (${payload.subjectA}) & ${payload.teacherB} (${
+          payload.subjectB || payload.subjectA
+        }) rassemblés sur ${payload.day} P${payload.period}.`,
+        'schedule_updated',
+        payload.teacherA
+      );
+    }
+  };
+
+  // Remove a specific session from a class
+  const handleRemoveTeacherSession = async (
+    classId: string,
+    day: DayOfWeek,
+    period: number
+  ) => {
+    const cls = classes.find((c) => c.id === classId);
+    if (!cls) return;
+    const key = `${day}_${period}`;
+    const nextSlots = { ...cls.slots };
+    delete nextSlots[key];
+    await saveClassToStore({ ...cls, slots: nextSlots }, [key]);
+  };
+
+  // Print or Download Official Load Report (Load Teachers / Load Subjects)
+  const handlePrintLoadReport = (mode: 'teachers_load' | 'subjects_load') => {
+    const teacherRows = computeTeachersLoadReport(
+      teachers,
+      classes,
+      selectedCategory
+    );
+    const subjectRows = computeSubjectsLoadReport(
+      classes,
+      subjectConfigs,
+      selectedCategory
+    );
+    const html = generatePrintableLoadReportHtml(
+      mode,
+      teacherRows,
+      subjectRows,
+      selectedCategory,
+      schoolYear
+    );
+    const filename =
+      mode === 'teachers_load'
+        ? `AlKawthar_Load_Teachers_${selectedCategory}_${schoolYear}.html`
+        : `AlKawthar_Load_Subjects_${selectedCategory}_${schoolYear}.html`;
+    handleDownloadFile(html, filename, 'text/html');
+    appendAuditLog(
+      `Impression ${mode === 'teachers_load' ? 'Load Teachers' : 'Load Subjects'}`,
+      `Rapport HTML/PDF Paysage généré (${CATEGORY_SHORT_LABELS[selectedCategory]}).`
+    );
+  };
+
+  // Print or Download Master Ensemble View (All Classes Together)
+  const handlePrintEnsembleMatrix = () => {
+    const html = generatePrintableEnsembleHtml(
+      classes,
+      selectedCategory,
+      schoolYear
+    );
+    handleDownloadFile(
+      html,
+      `AlKawthar_Vue_Ensemble_${selectedCategory}_${schoolYear}.html`,
+      'text/html'
+    );
+    appendAuditLog(
+      `Impression Vue Ensemble (${CATEGORY_SHORT_LABELS[selectedCategory]})`,
+      `Matrice complète multi-classes exportée en HTML/PDF Paysage.`
     );
   };
 
@@ -1804,328 +2342,504 @@ export default function App() {
          ===================================================================== */}
       <main className="flex-1 max-w-[1440px] w-full mx-auto px-6 py-6">
         {/* ===================================================================
-            MODULE 1: ÉDITEUR VISUEL INTERACTIF (CLASSE / PROF / SALLE / MATIÈRE)
+            MODULE 1: ÉDITEUR VISUEL INTERACTIF & VUE ENSEMBLE (TOUTES LES CLASSES)
            =================================================================== */}
         {activeTab === 'editor' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Left Sidebar: View Mode Selector + Entity Directory */}
-            <aside
-              className={`lg:col-span-3 border rounded-lg p-4 no-print ${
+          <div className="space-y-4">
+            {/* Top Mode Switcher: Vue Ensemble (Toutes les classes) vs Grille Individuelle vs Loads & Matières */}
+            <div
+              className={`border rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3 no-print ${
                 darkMode
                   ? 'bg-slate-900 border-slate-800'
                   : 'bg-white border-slate-200'
               }`}
             >
-              {/* 4 View Modes: Classe, Enseignant, Salle, Matière */}
-              <div className="mb-3">
-                <label className="block text-[11px] font-semibold text-slate-500 mb-1.5">
-                  Mode d'affichage de la grille
-                </label>
-                <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg">
-                  {(
-                    [
-                      ['class', 'Par Classe'],
-                      ['teacher', 'Par Professeur'],
-                      ['room', 'Par Salle'],
-                      ['subject', 'Par Matière'],
-                    ] as const
-                  ).map(([mKey, mLabel]) => (
-                    <button
-                      key={mKey}
-                      onClick={() => setGridViewMode(mKey)}
-                      className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
-                        gridViewMode === mKey
-                          ? 'bg-white text-slate-950 shadow-xs'
-                          : 'text-slate-600 hover:text-slate-900'
-                      }`}
-                    >
-                      {mLabel}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Search Input */}
-              <div className="relative mb-3">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Recherche instantanée..."
-                  className={`w-full pl-8 pr-3 py-1.5 text-xs border rounded-md focus:outline-none focus:border-sky-600 ${
-                    darkMode
-                      ? 'bg-slate-800 border-slate-700 text-white'
-                      : 'bg-slate-50 border-slate-200 text-slate-900'
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditorSubMode('ensemble')}
+                  className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 ${
+                    editorSubMode === 'ensemble'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
-                />
+                >
+                  <LayoutGrid className="w-4 h-4 text-sky-400" />
+                  <span>
+                    Vue Ensemble (Toutes les Classes · Switch Intelligent)
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setEditorSubMode('single')}
+                  className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 ${
+                    editorSubMode === 'single'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  <Calendar className="w-4 h-4 text-emerald-400" />
+                  <span>
+                    Grille Individuelle (Classe / Prof / Salle / Matière)
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setEditorSubMode('loads')}
+                  className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 ${
+                    editorSubMode === 'loads'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  <BookOpen className="w-4 h-4 text-amber-400" />
+                  <span>
+                    Matières, Enseignants, Loads & Cours Communs / Intercalés
+                  </span>
+                </button>
               </div>
 
-              {/* Directory List depending on gridViewMode */}
-              {gridViewMode === 'class' && (
-                <>
-                  <div className="flex flex-wrap gap-1 mb-3 pb-3 border-b border-slate-200/60">
-                    {(
-                      [
-                        ['ALL', 'Toutes'],
-                        ['KG', 'KG'],
-                        ['KG3_GS', 'KG3/GS'],
-                        ['Primary', 'Primaire'],
-                        ['Secondary_Girls', 'Sec. Filles'],
-                        ['Secondary_Boys', 'Sec. Garçons'],
-                      ] as const
-                    ).map(([secKey, label]) => (
-                      <button
-                        key={secKey}
-                        onClick={() => setSelectedSection(secKey)}
-                        className={`px-2 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
-                          selectedSection === secKey
-                            ? 'bg-sky-700 text-white'
-                            : 'bg-slate-100 text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
+              {/* Quick Print Load Reports */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handlePrintLoadReport('teachers_load')}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 text-sky-700" />
+                  <span>Imprimer Load Teachers</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePrintLoadReport('subjects_load')}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Imprimer Load Subjects</span>
+                </button>
+              </div>
+            </div>
 
-                  <div className="space-y-1 max-h-[500px] overflow-y-auto pr-1">
-                    {filteredClasses.map((cls) => {
-                      const slotCount = Object.keys(cls.slots).length;
-                      const isSelected = cls.id === selectedClass.id;
-                      const lockedCount = (lockedSlotsByClass[cls.id] || []).length;
-                      return (
+            {/* SUB-MODE A: VUE ENSEMBLE (ALL CLASSES TOGETHER + SMART SWITCH) */}
+            {editorSubMode === 'ensemble' && (
+              <MasterEnsembleMatrix
+                classes={classes}
+                teachers={teachers}
+                lockedSlotsByClass={lockedSlotsByClass}
+                selectedCategory={selectedCategory}
+                onSelectCategory={setSelectedCategory}
+                onSwitchSlots={handleSwitchSlotsInAnyClass}
+                onEditCell={(classId, day, period, slot) => {
+                  setSelectedClassId(classId);
+                  handleOpenSlotEditor(day, period, slot, classId);
+                }}
+                onOpenJointModal={() => {
+                  setEditorSubMode('loads');
+                }}
+                onPrintEnsemble={handlePrintEnsembleMatrix}
+                darkMode={darkMode}
+              />
+            )}
+
+            {/* SUB-MODE B: LOADS, MATIÈRES, ENSEIGNANTS & COURS COMMUNS / INTERCALÉS */}
+            {editorSubMode === 'loads' && (
+              <LoadsAndManagementWorkspace
+                classes={classes}
+                teachers={teachers}
+                subjectConfigs={subjectConfigs}
+                rooms={rooms}
+                selectedCategory={selectedCategory}
+                onSelectCategory={setSelectedCategory}
+                onAddSubjectWithClasses={handleAddSubjectWithClasses}
+                onAddNewTeacher={handleAddNewTeacher}
+                onAdjustClassSubjectLoad={handleAdjustClassSubjectLoad}
+                onAssembleClassesOrTeachers={handleAssembleClassesOrTeachers}
+                onRemoveTeacherSession={handleRemoveTeacherSession}
+                onUpdateTeacherMaxLoad={(teacherId, maxLoad) => {
+                  const found = teachers.find((t) => t.id === teacherId);
+                  if (found) {
+                    saveTeacherToStore({
+                      ...found,
+                      maxPeriodsPerWeek: maxLoad,
+                    });
+                  }
+                }}
+                onPrintLoadReport={handlePrintLoadReport}
+                darkMode={darkMode}
+              />
+            )}
+
+            {/* SUB-MODE C: SINGLE TIMETABLE GRID (CLASSE / PROF / SALLE / MATIÈRE) */}
+            {editorSubMode === 'single' && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                {/* Left Sidebar: View Mode Selector + Entity Directory */}
+                <aside
+                  className={`lg:col-span-3 border rounded-lg p-4 no-print ${
+                    darkMode
+                      ? 'bg-slate-900 border-slate-800'
+                      : 'bg-white border-slate-200'
+                  }`}
+                >
+                  {/* 4 View Modes: Classe, Enseignant, Salle, Matière */}
+                  <div className="mb-3">
+                    <label className="block text-[11px] font-semibold text-slate-500 mb-1.5">
+                      Mode d'affichage de la grille
+                    </label>
+                    <div className="grid grid-cols-2 gap-1 p-1 bg-slate-100 dark:bg-slate-800 rounded-lg">
+                      {(
+                        [
+                          ['class', 'Par Classe'],
+                          ['teacher', 'Par Professeur'],
+                          ['room', 'Par Salle'],
+                          ['subject', 'Par Matière'],
+                        ] as const
+                      ).map(([mKey, mLabel]) => (
                         <button
-                          key={cls.id}
-                          onClick={() => setSelectedClassId(cls.id)}
-                          className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
-                            isSelected
-                              ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
-                              : 'hover:bg-slate-100/60'
+                          key={mKey}
+                          onClick={() => setGridViewMode(mKey)}
+                          className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                            gridViewMode === mKey
+                              ? 'bg-white text-slate-950 shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
                           }`}
                         >
-                          <span className="truncate">{cls.name}</span>
-                          <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                            {slotCount}p {lockedCount > 0 ? `· ${lockedCount}v` : ''}
-                          </span>
+                          {mLabel}
                         </button>
-                      );
-                    })}
+                      ))}
+                    </div>
                   </div>
-                </>
-              )}
 
-              {gridViewMode === 'teacher' && (
-                <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
-                  {filteredTeachers.map((t) => {
-                    const stats = buildTeacherTimetable(t.name, classes);
-                    const isSelected = t.id === selectedTeacher?.id;
-                    return (
-                      <button
-                        key={t.id}
-                        onClick={() => setSelectedTeacherId(t.id)}
-                        className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
-                          isSelected
-                            ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
-                            : 'hover:bg-slate-100/60'
-                        }`}
-                      >
-                        <span className="truncate">{t.name}</span>
-                        <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                          {stats.totalPeriods}p/sem
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {gridViewMode === 'room' && (
-                <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
-                  {rooms.map((r) => {
-                    const isSelected = r.id === selectedRoom.id;
-                    return (
-                      <button
-                        key={r.id}
-                        onClick={() => setSelectedRoomId(r.id)}
-                        className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
-                          isSelected
-                            ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
-                            : 'hover:bg-slate-100/60'
-                        }`}
-                      >
-                        <span className="truncate">{r.name}</span>
-                        <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                          {r.capacity} pl.
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {gridViewMode === 'subject' && (
-                <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
-                  {subjectConfigs.map((sub) => {
-                    const isSelected =
-                      sub.name.toLowerCase() ===
-                      selectedSubjectFilter.toLowerCase();
-                    return (
-                      <button
-                        key={sub.id}
-                        onClick={() => setSelectedSubjectFilter(sub.name)}
-                        className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
-                          isSelected
-                            ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
-                            : 'hover:bg-slate-100/60'
-                        }`}
-                      >
-                        <span className="truncate">{sub.name}</span>
-                        <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                          Coeff {sub.weight}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </aside>
-
-            {/* Right Main Column: Interactive Toolbar + Landscape Timetable Grid */}
-            <section className="lg:col-span-9 space-y-4">
-              {/* Post-Modification Smart Optimization Toolbar (Point 8) */}
-              <div
-                className={`border rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 no-print ${
-                  darkMode
-                    ? 'bg-slate-900 border-slate-800'
-                    : 'bg-white border-slate-200'
-                }`}
-              >
-                <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h1 className="text-lg font-bold">
-                      {gridViewMode === 'class' && `Classe : ${selectedClass.name}`}
-                      {gridViewMode === 'teacher' &&
-                        `Enseignant : ${selectedTeacher?.name}`}
-                      {gridViewMode === 'room' && `Salle : ${selectedRoom.name}`}
-                      {gridViewMode === 'subject' &&
-                        `Matière : ${selectedSubjectFilter}`}
-                    </h1>
-                    <span aria-hidden="true" className="text-slate-400">
-                      ·
-                    </span>
-                    <span className="text-xs text-slate-500">
-                      Glisser-déposer pour permuter · Cadenas pour verrouiller une séance
-                    </span>
+                  {/* Category Filter Pills (French Section, Boys Section, Girls Section...) */}
+                  <div className="mb-3">
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
+                      Catégorie (French / Boys / Girls)
+                    </label>
+                    <div className="flex flex-wrap gap-1">
+                      {(
+                        [
+                          'ALL',
+                          'French_Section',
+                          'Boys_Section',
+                          'Girls_Section',
+                          'American_Section',
+                          'KG_Primary',
+                        ] as SchoolCategory[]
+                      ).map((cat) => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => setSelectedCategory(cat)}
+                          className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${
+                            selectedCategory === cat
+                              ? 'bg-slate-900 text-white'
+                              : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {CATEGORY_SHORT_LABELS[cat]}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
 
-                {/* Smart Post-Modification Actions (Point 8) */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={handleRunGeminiOptimizeClass}
-                    disabled={isAiRunning}
-                    className="px-3 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 border border-sky-200 rounded-md hover:bg-sky-100 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Optimiser cette classe</span>
-                  </button>
+                  {/* Search Input */}
+                  <div className="relative mb-3">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Recherche instantanée..."
+                      className={`w-full pl-8 pr-3 py-1.5 text-xs border rounded-md focus:outline-none focus:border-sky-600 ${
+                        darkMode
+                          ? 'bg-slate-800 border-slate-700 text-white'
+                          : 'bg-slate-50 border-slate-200 text-slate-900'
+                      }`}
+                    />
+                  </div>
 
-                  <button
-                    onClick={() => {
-                      setActiveTab('ai_csp');
-                      handleGenerateMultiProposals('all');
-                    }}
-                    className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
-                  >
-                    Optimiser tout l'établissement
-                  </button>
+                  {/* Directory List depending on gridViewMode */}
+                  {gridViewMode === 'class' && (
+                    <>
+                      <div className="flex flex-wrap gap-1 mb-3 pb-3 border-b border-slate-200/60">
+                        {(
+                          [
+                            ['ALL', 'Toutes'],
+                            ['KG', 'KG'],
+                            ['KG3_GS', 'KG3/GS'],
+                            ['Primary', 'Primaire'],
+                            ['Secondary_Girls', 'Sec. Filles'],
+                            ['Secondary_Boys', 'Sec. Garçons'],
+                          ] as const
+                        ).map(([secKey, label]) => (
+                          <button
+                            key={secKey}
+                            onClick={() => setSelectedSection(secKey)}
+                            className={`px-2 py-1 text-[11px] font-medium rounded transition-colors whitespace-nowrap shrink-0 ${
+                              selectedSection === secKey
+                                ? 'bg-sky-700 text-white'
+                                : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
 
-                  {conflicts.length > 0 && (
-                    <button
-                      onClick={handleRepairAllConflicts}
-                      className="px-3 py-1.5 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-md transition-colors whitespace-nowrap shrink-0"
-                    >
-                      Réparer tous les conflits ({conflicts.length})
-                    </button>
+                      <div className="space-y-1 max-h-[500px] overflow-y-auto pr-1">
+                        {filteredClasses.map((cls) => {
+                          const slotCount = Object.keys(cls.slots).length;
+                          const isSelected = cls.id === selectedClass.id;
+                          const lockedCount = (
+                            lockedSlotsByClass[cls.id] || []
+                          ).length;
+                          return (
+                            <button
+                              key={cls.id}
+                              onClick={() => setSelectedClassId(cls.id)}
+                              className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                                isSelected
+                                  ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                                  : 'hover:bg-slate-100/60'
+                              }`}
+                            >
+                              <span className="truncate">{cls.name}</span>
+                              <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                                {slotCount}p{' '}
+                                {lockedCount > 0 ? `· ${lockedCount}v` : ''}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
                   )}
 
-                  <button
-                    onClick={() => {
-                      recordHistoryAndSetClasses(bestVersionSnapshot);
-                      appendAuditLog(
-                        'Restauration meilleure version',
-                        'Retour à la version de référence validée.'
-                      );
-                    }}
-                    className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                  {gridViewMode === 'teacher' && (
+                    <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
+                      {filteredTeachers.map((t) => {
+                        const stats = buildTeacherTimetable(t.name, classes);
+                        const isSelected = t.id === selectedTeacher?.id;
+                        return (
+                          <button
+                            key={t.id}
+                            onClick={() => setSelectedTeacherId(t.id)}
+                            className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                              isSelected
+                                ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                                : 'hover:bg-slate-100/60'
+                            }`}
+                          >
+                            <span className="truncate">{t.name}</span>
+                            <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                              {stats.totalPeriods}p/sem
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {gridViewMode === 'room' && (
+                    <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
+                      {rooms.map((r) => {
+                        const isSelected = r.id === selectedRoom.id;
+                        return (
+                          <button
+                            key={r.id}
+                            onClick={() => setSelectedRoomId(r.id)}
+                            className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                              isSelected
+                                ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                                : 'hover:bg-slate-100/60'
+                            }`}
+                          >
+                            <span className="truncate">{r.name}</span>
+                            <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                              {r.capacity} pl.
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {gridViewMode === 'subject' && (
+                    <div className="space-y-1 max-h-[540px] overflow-y-auto pr-1">
+                      {subjectConfigs.map((sub) => {
+                        const isSelected =
+                          sub.name.toLowerCase() ===
+                          selectedSubjectFilter.toLowerCase();
+                        return (
+                          <button
+                            key={sub.id}
+                            onClick={() => setSelectedSubjectFilter(sub.name)}
+                            className={`w-full text-left px-3 py-2 rounded-md text-xs transition-colors flex items-center justify-between ${
+                              isSelected
+                                ? 'bg-sky-50 text-sky-950 font-semibold border border-sky-200'
+                                : 'hover:bg-slate-100/60'
+                            }`}
+                          >
+                            <span className="truncate">{sub.name}</span>
+                            <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                              Coeff {sub.weight}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </aside>
+
+                {/* Right Main Column: Interactive Toolbar + Landscape Timetable Grid */}
+                <section className="lg:col-span-9 space-y-4">
+                  {/* Post-Modification Smart Optimization Toolbar (Point 8) */}
+                  <div
+                    className={`border rounded-lg p-4 flex flex-wrap items-center justify-between gap-4 no-print ${
+                      darkMode
+                        ? 'bg-slate-900 border-slate-800'
+                        : 'bg-white border-slate-200'
+                    }`}
                   >
-                    Restaurer version de référence
-                  </button>
-                </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h1 className="text-lg font-bold">
+                          {gridViewMode === 'class' &&
+                            `Classe : ${selectedClass.name}`}
+                          {gridViewMode === 'teacher' &&
+                            `Enseignant : ${selectedTeacher?.name}`}
+                          {gridViewMode === 'room' &&
+                            `Salle : ${selectedRoom.name}`}
+                          {gridViewMode === 'subject' &&
+                            `Matière : ${selectedSubjectFilter}`}
+                        </h1>
+                        <span aria-hidden="true" className="text-slate-400">
+                          ·
+                        </span>
+                        <span className="text-xs text-slate-500">
+                          Glisser-déposer pour permuter · Cadenas pour verrouiller une séance
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Smart Post-Modification Actions (Point 8) */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => setEditorSubMode('ensemble')}
+                        className="px-3 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-md transition-colors whitespace-nowrap shrink-0"
+                      >
+                        Retour Vue Ensemble (35 classes)
+                      </button>
+
+                      <button
+                        onClick={handleRunGeminiOptimizeClass}
+                        disabled={isAiRunning}
+                        className="px-3 py-1.5 text-xs font-semibold text-sky-800 bg-sky-50 border border-sky-200 rounded-md hover:bg-sky-100 transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Optimiser cette classe</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setActiveTab('ai_csp');
+                          handleGenerateMultiProposals('all');
+                        }}
+                        className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                      >
+                        Optimiser tout l'établissement
+                      </button>
+
+                      {conflicts.length > 0 && (
+                        <button
+                          onClick={handleRepairAllConflicts}
+                          className="px-3 py-1.5 text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 rounded-md transition-colors whitespace-nowrap shrink-0"
+                        >
+                          Réparer tous les conflits ({conflicts.length})
+                        </button>
+                      )}
+
+                      <button
+                        onClick={() => {
+                          recordHistoryAndSetClasses(bestVersionSnapshot);
+                          appendAuditLog(
+                            'Restauration meilleure version',
+                            'Retour à la version de référence validée.'
+                          );
+                        }}
+                        className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 border border-slate-200 rounded-md transition-colors whitespace-nowrap shrink-0"
+                      >
+                        Restaurer version de référence
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Timetable Grid Sheet */}
+                  {gridViewMode === 'class' && (
+                    <LandscapeTimetableSheet
+                      title={selectedClass.name}
+                      subtitle={`${selectedCampus} · ${SCHOOL_INFO.subtitle} · Scénario ${scenario.toUpperCase()}`}
+                      section={selectedClass.section}
+                      slots={selectedClass.slots}
+                      editable={roleMode !== 'teacher'}
+                      conflictSlotKeys={selectedClassConflictKeys}
+                      lockedSlotKeys={
+                        new Set(lockedSlotsByClass[selectedClass.id] || [])
+                      }
+                      modifiedSlotKeys={
+                        new Set(modifiedSlotsByClass[selectedClass.id] || [])
+                      }
+                      onSlotClick={handleOpenSlotEditor}
+                      onSlotSwap={handleDragDropSlotSwap}
+                      onToggleLockSlot={handleToggleLockSlot}
+                    />
+                  )}
+
+                  {gridViewMode === 'teacher' && selectedTeacher && (
+                    <LandscapeTimetableSheet
+                      title={`Prof. ${selectedTeacher.name}`}
+                      subtitle={`${SCHOOL_INFO.subtitle} · Matières : ${selectedTeacher.subjects.join(
+                        ', '
+                      )} · Charge : ${selectedTeacherSchedule.totalPeriods}p/sem`}
+                      section="Primary"
+                      slots={selectedTeacherSchedule.slots}
+                      isTeacherView={true}
+                      unavailableSlotKeys={
+                        new Set(selectedTeacher.unavailableSlots)
+                      }
+                    />
+                  )}
+
+                  {gridViewMode === 'room' && (
+                    <LandscapeTimetableSheet
+                      title={selectedRoom.name}
+                      subtitle={`${selectedRoom.campus} · Capacité : ${selectedRoom.capacity} élèves · Équipements : ${selectedRoom.equipment.join(
+                        ', '
+                      )}`}
+                      section="Primary"
+                      slots={selectedRoomSchedule}
+                      isTeacherView={true}
+                    />
+                  )}
+
+                  {gridViewMode === 'subject' && (
+                    <LandscapeTimetableSheet
+                      title={`Matière : ${selectedSubjectFilter}`}
+                      subtitle={`Répartition hebdomadaire inter-classes — ${SCHOOL_INFO.name}`}
+                      section="Primary"
+                      slots={selectedSubjectSchedule}
+                      isTeacherView={true}
+                    />
+                  )}
+                </section>
               </div>
-
-              {/* Timetable Grid Sheet */}
-              {gridViewMode === 'class' && (
-                <LandscapeTimetableSheet
-                  title={selectedClass.name}
-                  subtitle={`${selectedCampus} · ${SCHOOL_INFO.subtitle} · Scénario ${scenario.toUpperCase()}`}
-                  section={selectedClass.section}
-                  slots={selectedClass.slots}
-                  editable={roleMode !== 'teacher'}
-                  conflictSlotKeys={selectedClassConflictKeys}
-                  lockedSlotKeys={
-                    new Set(lockedSlotsByClass[selectedClass.id] || [])
-                  }
-                  modifiedSlotKeys={
-                    new Set(modifiedSlotsByClass[selectedClass.id] || [])
-                  }
-                  onSlotClick={handleOpenSlotEditor}
-                  onSlotSwap={handleDragDropSlotSwap}
-                  onToggleLockSlot={handleToggleLockSlot}
-                />
-              )}
-
-              {gridViewMode === 'teacher' && selectedTeacher && (
-                <LandscapeTimetableSheet
-                  title={`Prof. ${selectedTeacher.name}`}
-                  subtitle={`${SCHOOL_INFO.subtitle} · Matières : ${selectedTeacher.subjects.join(
-                    ', '
-                  )} · Charge : ${selectedTeacherSchedule.totalPeriods}p/sem`}
-                  section="Primary"
-                  slots={selectedTeacherSchedule.slots}
-                  isTeacherView={true}
-                  unavailableSlotKeys={new Set(selectedTeacher.unavailableSlots)}
-                />
-              )}
-
-              {gridViewMode === 'room' && (
-                <LandscapeTimetableSheet
-                  title={selectedRoom.name}
-                  subtitle={`${selectedRoom.campus} · Capacité : ${selectedRoom.capacity} élèves · Équipements : ${selectedRoom.equipment.join(
-                    ', '
-                  )}`}
-                  section="Primary"
-                  slots={selectedRoomSchedule}
-                  isTeacherView={true}
-                />
-              )}
-
-              {gridViewMode === 'subject' && (
-                <LandscapeTimetableSheet
-                  title={`Matière : ${selectedSubjectFilter}`}
-                  subtitle={`Répartition hebdomadaire inter-classes — ${SCHOOL_INFO.name}`}
-                  section="Primary"
-                  slots={selectedSubjectSchedule}
-                  isTeacherView={true}
-                />
-              )}
-            </section>
+            )}
           </div>
         )}
 
         {/* ===================================================================
-            MODULE 2: GESTION DES ENSEIGNANTS, DISPONIBILITÉS & REMPLACEMENTS
+            MODULE 2: GESTION DES ENSEIGNANTS, LOADS, DISPONIBILITÉS & REMPLACEMENTS
            =================================================================== */}
         {activeTab === 'teachers' && (
           <div className="space-y-6">
@@ -2137,12 +2851,13 @@ export default function App() {
                   : 'bg-white border-slate-200'
               }`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {(
                   [
                     ['directory', '1. Affectation par Défaut & Charges Horaires'],
-                    ['availability', '2. Disponibilités & Jours sans cours'],
-                    ['substitutes', '3. Absences & Remplacements Automatiques'],
+                    ['loads_subjects', '2. Loads Matières/Profs, Ajouts & Cours Communs'],
+                    ['availability', '3. Disponibilités & Jours sans cours'],
+                    ['substitutes', '4. Absences & Remplacements Automatiques'],
                   ] as const
                 ).map(([subKey, subLabel]) => (
                   <button
@@ -2159,19 +2874,63 @@ export default function App() {
                 ))}
               </div>
 
-              <button
-                onClick={handleApplyAllDefaultTimetables}
-                disabled={isSyncingDefaults}
-                className="px-4 py-2 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
-              >
-                <UserCheck className="w-4 h-4" />
-                <span>
-                  {isSyncingDefaults
-                    ? 'Synchronisation...'
-                    : `Appliquer par défaut aux ${teachers.length} enseignants`}
-                </span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => handlePrintLoadReport('teachers_load')}
+                  className="px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 text-sky-700" />
+                  <span>Imprimer Load Teachers</span>
+                </button>
+                <button
+                  onClick={() => handlePrintLoadReport('subjects_load')}
+                  className="px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Imprimer Load Subjects</span>
+                </button>
+                <button
+                  onClick={handleApplyAllDefaultTimetables}
+                  disabled={isSyncingDefaults}
+                  className="px-4 py-2 text-xs font-semibold text-white bg-sky-700 hover:bg-sky-800 disabled:opacity-50 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0"
+                >
+                  <UserCheck className="w-4 h-4" />
+                  <span>
+                    {isSyncingDefaults
+                      ? 'Synchronisation...'
+                      : `Appliquer par défaut (${teachers.length} profs)`}
+                  </span>
+                </button>
+              </div>
             </div>
+
+            {/* SUB-TAB: LOADS, MATIÈRES, ENSEIGNANTS & COURS COMMUNS */}
+            {teacherSubTab === 'loads_subjects' && (
+              <LoadsAndManagementWorkspace
+                classes={classes}
+                teachers={teachers}
+                subjectConfigs={subjectConfigs}
+                rooms={rooms}
+                selectedCategory={selectedCategory}
+                onSelectCategory={setSelectedCategory}
+                onAddSubjectWithClasses={handleAddSubjectWithClasses}
+                onAddNewTeacher={handleAddNewTeacher}
+                onAdjustClassSubjectLoad={handleAdjustClassSubjectLoad}
+                onAssembleClassesOrTeachers={handleAssembleClassesOrTeachers}
+                onRemoveTeacherSession={handleRemoveTeacherSession}
+                onUpdateTeacherMaxLoad={(teacherId, maxLoad) => {
+                  const found = teachers.find((t) => t.id === teacherId);
+                  if (found) {
+                    saveTeacherToStore({
+                      ...found,
+                      maxPeriodsPerWeek: maxLoad,
+                    });
+                  }
+                }}
+                onPrintLoadReport={handlePrintLoadReport}
+                darkMode={darkMode}
+              />
+            )}
 
             {/* SUB-TAB 1: DIRECTORY & WORKLOAD BALANCING */}
             {teacherSubTab === 'directory' && (
@@ -2183,17 +2942,44 @@ export default function App() {
                       : 'bg-white border-slate-200'
                   }`}
                 >
-                  <div className="p-4 border-b border-slate-200 flex items-center justify-between gap-3">
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Filtrer enseignant, matière, section..."
-                      className="w-full px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900"
-                    />
-                    <span className="text-xs font-mono text-slate-500 tabular-nums shrink-0">
-                      {filteredTeachers.length} profs
-                    </span>
+                  <div className="p-3 border-b border-slate-200 space-y-2">
+                    <div className="flex flex-wrap gap-1">
+                      {(
+                        [
+                          'ALL',
+                          'French_Section',
+                          'Boys_Section',
+                          'Girls_Section',
+                          'American_Section',
+                          'KG_Primary',
+                        ] as SchoolCategory[]
+                      ).map((cat) => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => setSelectedCategory(cat)}
+                          className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${
+                            selectedCategory === cat
+                              ? 'bg-slate-900 text-white'
+                              : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          {CATEGORY_SHORT_LABELS[cat]}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Filtrer enseignant, matière, section..."
+                        className="w-full px-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md text-slate-900"
+                      />
+                      <span className="text-xs font-mono text-slate-500 tabular-nums shrink-0">
+                        {filteredTeachers.length} profs
+                      </span>
+                    </div>
                   </div>
 
                   <div className="max-h-[580px] overflow-y-auto divide-y divide-slate-100">
@@ -3269,6 +4055,30 @@ export default function App() {
                   </button>
 
                   <button
+                    onClick={() => handlePrintEnsembleMatrix()}
+                    className="px-3.5 py-2.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <LayoutGrid className="w-4 h-4" />
+                    <span>Imprimer Vue Ensemble (HTML/PDF)</span>
+                  </button>
+
+                  <button
+                    onClick={() => handlePrintLoadReport('teachers_load')}
+                    className="px-3.5 py-2.5 text-xs font-semibold text-sky-900 bg-sky-50 border border-sky-200 hover:bg-sky-100 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <Printer className="w-4 h-4 text-sky-700" />
+                    <span>Imprimer Load Teachers (PDF)</span>
+                  </button>
+
+                  <button
+                    onClick={() => handlePrintLoadReport('subjects_load')}
+                    className="px-3.5 py-2.5 text-xs font-semibold text-emerald-900 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <Printer className="w-4 h-4 text-emerald-700" />
+                    <span>Imprimer Load Subjects (PDF)</span>
+                  </button>
+
+                  <button
                     onClick={() => handleDownloadLandscapeHtml('all_classes')}
                     className="px-3.5 py-2.5 text-xs font-semibold text-slate-900 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2"
                   >
@@ -3332,7 +4142,7 @@ export default function App() {
                         'application/json'
                       )
                     }
-                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2"
+                    className="px-3.5 py-2.5 text-xs font-medium text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-2 sm:col-span-2"
                   >
                     <Download className="w-4 h-4" />
                     <span>Sauvegarde JSON / Atlas</span>
@@ -3444,7 +4254,9 @@ export default function App() {
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-base font-bold text-slate-950">
-                  Modifier la séance — {selectedClass.name}
+                  Modifier la séance —{' '}
+                  {classes.find((c) => c.id === editingCell.classId)?.name ||
+                    selectedClass.name}
                 </h3>
                 <p className="text-xs text-slate-500 tabular-nums">
                   {editingCell.day} · Période {editingCell.period}
@@ -3515,14 +4327,41 @@ export default function App() {
                 </datalist>
               </div>
 
-              <div className="pt-2 border-t border-slate-100">
-                <span className="block text-[11px] font-semibold text-slate-500 mb-2">
-                  Optionnel : Sous-groupe / Co-enseignement (ex: Easy Arabic)
+              <div className="pt-2 border-t border-slate-100 space-y-2.5">
+                <div>
+                  <label className="block text-[11px] font-semibold text-indigo-800 mb-1">
+                    Rassembler avec une 2e classe (Cours commun au même créneau)
+                  </label>
+                  <select
+                    value={editingCell.jointWithClassName || ''}
+                    onChange={(e) =>
+                      setEditingCell({
+                        ...editingCell,
+                        jointWithClassName: e.target.value,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 text-xs border border-indigo-200 bg-indigo-50/40 rounded-md"
+                  >
+                    <option value="">
+                      — Aucune (Classe unique sur ce créneau) —
+                    </option>
+                    {classes
+                      .filter((c) => c.id !== editingCell.classId)
+                      .map((c) => (
+                        <option key={c.id} value={c.name}>
+                          ⊕ Rassembler avec {c.name} ({c.section})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                <span className="block text-[11px] font-semibold text-amber-800 pt-1">
+                  Optionnel : Séance Intercalée / Co-enseignement (2 profs ou 2 demi-groupes)
                 </span>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[11px] text-slate-600 mb-1">
-                      2e Matière
+                      2e Matière (Intercalée)
                     </label>
                     <input
                       type="text"
@@ -3533,13 +4372,13 @@ export default function App() {
                           subSubject: e.target.value,
                         })
                       }
-                      placeholder="Ex: Easy Arabic"
+                      placeholder="Ex: Easy Arabic / Lab G2"
                       className="w-full px-2.5 py-1.5 text-xs border border-slate-300 rounded-md"
                     />
                   </div>
                   <div>
                     <label className="block text-[11px] text-slate-600 mb-1">
-                      2e Enseignant
+                      2e Enseignant (Co-prof)
                     </label>
                     <input
                       type="text"
@@ -3568,6 +4407,7 @@ export default function App() {
                       teacher: '',
                       subSubject: '',
                       subTeacher: '',
+                      jointWithClassName: '',
                     })
                   }
                   className="text-xs font-medium text-red-600 hover:underline"
