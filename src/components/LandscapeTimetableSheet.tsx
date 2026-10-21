@@ -6,6 +6,7 @@ import {
   SCHOOL_INFO,
 } from '../data/alkawtharDefaults';
 import {
+  BellRow,
   DayOfWeek,
   LessonSlot,
   SectionType,
@@ -16,6 +17,8 @@ interface LandscapeTimetableSheetProps {
   subtitle?: string;
   section: SectionType;
   slots: Record<string, LessonSlot>;
+  customBellRows?: BellRow[];
+  bellGroupName?: string;
   isTeacherView?: boolean;
   editable?: boolean;
   conflictSlotKeys?: Set<string>;
@@ -83,6 +86,8 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
   subtitle = SCHOOL_INFO.subtitle,
   section,
   slots,
+  customBellRows,
+  bellGroupName,
   isTeacherView = false,
   editable = false,
   conflictSlotKeys,
@@ -93,7 +98,10 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
   onSlotSwap,
   onToggleLockSlot,
 }) => {
-  const bellRows = BELL_SCHEDULES[section] || BELL_SCHEDULES.Primary;
+  const bellRows =
+    customBellRows && customBellRows.length > 0
+      ? customBellRows
+      : BELL_SCHEDULES[section] || BELL_SCHEDULES.Primary;
   const [draggedKey, setDraggedKey] = useState<string | null>(null);
   const [dragOverKey, setDragOverKey] = useState<string | null>(null);
 
@@ -110,6 +118,7 @@ export const LandscapeTimetableSheet: React.FC<LandscapeTimetableSheetProps> = (
           </h2>
           <p className="text-xs font-medium text-slate-700 mt-1.5">
             {subtitle}
+            {bellGroupName ? ` · ${bellGroupName}` : ''}
           </p>
         </div>
       </div>

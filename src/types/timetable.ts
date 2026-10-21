@@ -20,6 +20,18 @@ export interface BellRow {
   periodNumber?: number;
   label: string;
   time: string;
+  durationMinutes?: number;
+}
+
+export interface BellScheduleGroup {
+  id: string;
+  name: string;
+  category: Exclude<SchoolCategory, 'ALL'>;
+  sectionKey: SectionType;
+  description: string;
+  classNames: string[]; // Classes belonging to this timing group
+  maxPeriodsPerDay: number;
+  rows: BellRow[];
 }
 
 export interface LessonSlot {
@@ -28,6 +40,7 @@ export interface LessonSlot {
   subSubject?: string;
   subTeacher?: string;
   room?: string;
+  groupName?: string; // e.g. 'Classe complète', 'Classe complète,Classe complète', 'Groupe 1', 'Demi-groupe'
   jointWithClasses?: string[]; // Classes assembled together at the same period
   isIntercalated?: boolean; // Marked if split/interleaved or overlapping bell schedule
   intercalatedNote?: string;
@@ -38,6 +51,7 @@ export interface SchoolClass {
   name: string;
   section: SectionType;
   category?: Exclude<SchoolCategory, 'ALL'>;
+  timingGroupId?: string;
   room: string;
   visibility: 'school';
   slots: Record<string, LessonSlot>; // key format: "${DayOfWeek}_${periodNumber}"

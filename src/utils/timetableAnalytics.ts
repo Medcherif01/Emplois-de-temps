@@ -5,6 +5,8 @@ import {
   teacherMatchesSlot,
 } from '../data/alkawtharDefaults';
 import {
+  BellRow,
+  BellScheduleGroup,
   DayOfWeek,
   IntercalatedSessionInfo,
   LessonSlot,
@@ -685,6 +687,16 @@ export function detectIntercalatedSessions(
   return list;
 }
 
+export interface TeacherLoadLineItem {
+  id: string;
+  classesLabel: string; // e.g. "MS,GS,PS" or "PS,MS" or "GS"
+  classIds: string[];
+  groupLabel: string; // e.g. "Classe complète" or "Classe complète,Classe complète" or "Demi-groupe"
+  subject: string;
+  periods: number;
+  isJointOrGrouped: boolean;
+}
+
 export interface TeacherLoadRow {
   teacherId: string;
   teacherName: string;
@@ -697,9 +709,11 @@ export interface TeacherLoadRow {
   classBreakdown: Array<{
     classId: string;
     className: string;
+    groupLabel: string;
     subject: string;
     periods: number;
   }>;
+  lineItems: TeacherLoadLineItem[];
   jointAndSplitCount: number;
 }
 
@@ -713,15 +727,124 @@ export function computeTeachersLoadReport(
     .map((t) => {
       const breakdownMap = new Map<
         string,
-        { classId: string; className: string; subject: string; periods: number }
+        {
+          classId: string;
+          className: string;
+          groupLabel: string;
+          subject: string;
+          periods: number;
+        }
       >();
+
+      // Line items grouped by (slotKey if joint across classes, or single class + group + subject)
+      const lineItemsMap = new Map<
+        string,
+        {
+          classesLabel: string;
+          classIds: string[];
+          groupLabel: string;
+          subject: string;
+          periods: number;
+          isJointOrGrouped: boolean;
+        }
+      >();
+
+      // Track slotKeys already counted as a multi-class joint session for this teacher
+      const processedJointSlotKeys = new Set<string>();
+
       let totalPeriods = 0;
       let jointAndSplitCount = 0;
       const catsCount = new Map<Exclude<SchoolCategory, 'ALL'>, number>();
 
+      // First pass: check all day_period keys across all classes to detect when this teacher teaches multiple classes simultaneously (e.g. MS,GS,PS or PS,MS)
+      for (const day of DAYS_OF_WEEK) {
+        for (let p = 1; p <= 8; p++) {
+          const slotKey = `${day}_${p}`;
+          const matchingClassesAtSlot: Array<{
+            cls: SchoolClass;
+            subj: string;
+            groupLabel: string;
+          }> = [];
+
+          for (const cls of classes) {
+            const slot = cls.slots[slotKey];
+            if (!slot) continue;
+            const matchPrimary = teacherMatchesSlot(t.name, slot.teacher);
+            const matchSub =
+              slot.subTeacher && teacherMatchesSlot(t.name, slot.subTeacher);
+
+            if (matchPrimary || matchSub) {
+              const subj = matchPrimary
+                ? slot.subject
+                : slot.subSubject || slot.subject;
+              const grp =
+                slot.groupName ||
+                (matchSub || (slot.subSubject && slot.subTeacher)
+                  ? 'Demi-groupe / Co-ens.'
+                  : 'Classe complète');
+              matchingClassesAtSlot.push({
+                cls,
+                subj,
+                groupLabel: grp,
+              });
+            }
+          }
+
+          if (matchingClassesAtSlot.length > 1) {
+            processedJointSlotKeys.add(slotKey);
+            totalPeriods += 1;
+            jointAndSplitCount += 1;
+
+            const sortedMatches = [...matchingClassesAtSlot].sort((a, b) =>
+              a.cls.name.localeCompare(b.cls.name)
+            );
+            const classesLabel = sortedMatches
+              .map((m) => m.cls.name)
+              .join(',');
+            const classIds = sortedMatches.map((m) => m.cls.id);
+            const groupLabel = sortedMatches
+              .map((m) => m.groupLabel)
+              .join(',');
+            const subj = sortedMatches[0].subj;
+
+            const liKey = `JOINT__${classesLabel}__${subj}__${groupLabel}`;
+            if (!lineItemsMap.has(liKey)) {
+              lineItemsMap.set(liKey, {
+                classesLabel,
+                classIds,
+                groupLabel,
+                subject: subj,
+                periods: 0,
+                isJointOrGrouped: true,
+              });
+            }
+            lineItemsMap.get(liKey)!.periods += 1;
+
+            // Also record in classBreakdown on the primary class so nothing is lost
+            const primaryCls = sortedMatches[0].cls;
+            const clsCat = getPrimaryClassCategory(primaryCls);
+            catsCount.set(clsCat, (catsCount.get(clsCat) || 0) + 1);
+            const bKey = `${classesLabel}__${subj}`;
+            if (!breakdownMap.has(bKey)) {
+              breakdownMap.set(bKey, {
+                classId: primaryCls.id,
+                className: classesLabel,
+                groupLabel,
+                subject: subj,
+                periods: 0,
+              });
+            }
+            breakdownMap.get(bKey)!.periods += 1;
+          }
+        }
+      }
+
+      // Second pass: regular single-class slots (or explicit jointWithClasses on a single class record)
       for (const cls of classes) {
         const clsCat = getPrimaryClassCategory(cls);
-        for (const slot of Object.values(cls.slots)) {
+        for (const [slotKey, slot] of Object.entries(cls.slots)) {
+          if (processedJointSlotKeys.has(slotKey)) continue;
+
           const matchPrimary = teacherMatchesSlot(t.name, slot.teacher);
           const matchSub =
             slot.subTeacher && teacherMatchesSlot(t.name, slot.subTeacher);
@@ -732,19 +855,52 @@ export function computeTeachersLoadReport(
               : slot.subSubject || slot.subject;
             totalPeriods += 1;
             catsCount.set(clsCat, (catsCount.get(clsCat) || 0) + 1);
-            if (
-              slot.jointWithClasses?.length ||
-              (slot.subSubject && slot.subTeacher) ||
+
+            const hasJointAttr =
+              slot.jointWithClasses && slot.jointWithClasses.length > 0;
+            const isCoOrSplit =
+              Boolean(slot.subSubject && slot.subTeacher) ||
               slot.teacher.includes('/') ||
-              slot.teacher.includes('&')
-            ) {
+              slot.teacher.includes('&') ||
+              slot.teacher.includes('+');
+
+            if (hasJointAttr || isCoOrSplit) {
               jointAndSplitCount += 1;
             }
+
+            const classesLabel = hasJointAttr
+              ? [cls.name, ...(slot.jointWithClasses || [])].join(',')
+              : cls.name;
+
+            const groupLabel =
+              slot.groupName ||
+              (hasJointAttr
+                ? [cls.name, ...(slot.jointWithClasses || [])]
+                    .map(() => 'Classe complète')
+                    .join(',')
+                : isCoOrSplit
+                ? 'Classe complète (Co-ens.)'
+                : 'Classe complète');
+
+            const liKey = `SINGLE__${classesLabel}__${subj}__${groupLabel}`;
+            if (!lineItemsMap.has(liKey)) {
+              lineItemsMap.set(liKey, {
+                classesLabel,
+                classIds: [cls.id],
+                groupLabel,
+                subject: subj,
+                periods: 0,
+                isJointOrGrouped: Boolean(hasJointAttr),
+              });
+            }
+            lineItemsMap.get(liKey)!.periods += 1;
+
             const bKey = `${cls.id}__${subj}`;
             if (!breakdownMap.has(bKey)) {
               breakdownMap.set(bKey, {
                 classId: cls.id,
-                className: cls.name,
+                className: classesLabel,
+                groupLabel,
                 subject: subj,
                 periods: 0,
               });
@@ -762,6 +918,20 @@ export function computeTeachersLoadReport(
         )[0][0];
       }
 
+      const lineItems: TeacherLoadLineItem[] = Array.from(
+        lineItemsMap.entries()
+      )
+        .map(([key, item]) => ({
+          id: key,
+          ...item,
+        }))
+        .sort((a, b) => {
+          if (a.isJointOrGrouped !== b.isJointOrGrouped) {
+            return a.isJointOrGrouped ? -1 : 1;
+          }
+          return b.periods - a.periods;
+        });
+
       const maxPeriods = t.maxPeriodsPerWeek || 24;
       return {
         teacherId: t.id,
@@ -775,7 +945,153 @@ export function computeTeachersLoadReport(
         classBreakdown: Array.from(breakdownMap.values()).sort((a, b) =>
           a.className.localeCompare(b.className)
         ),
+        lineItems,
         jointAndSplitCount,
+      };
+    });
+}
+
+export interface ClassLoadLineItem {
+  id: string;
+  classId: string;
+  className: string;
+  subject: string;
+  teacher: string;
+  groupLabel: string;
+  periods: number;
+  isCoTaughtOrSplit: boolean;
+}
+
+export interface ClassLoadBlock {
+  classId: string;
+  className: string;
+  section: SectionType;
+  category: Exclude<SchoolCategory, 'ALL'>;
+  categoryLabel: string;
+  room: string;
+  totalPeriods: number;
+  targetWeeklyCapacity: number; // e.g. 30 for KG, 35 for KG3/GS, 40 for Primary/Secondary
+  items: ClassLoadLineItem[];
+}
+
+/**
+ * Computes the Class Load Report matching Image 2 ("Load Classes"):
+ * For each class, lists every subject taught in that class, followed by the teacher(s)
+ * of that subject, the group, the weekly periods, and the total sum of periods for the class.
+ */
+export function computeClassesLoadReport(
+  classes: SchoolClass[],
+  categoryFilter: SchoolCategory = 'ALL'
+): ClassLoadBlock[] {
+  return classes
+    .filter((c) => classMatchesCategory(c, categoryFilter))
+    .map((cls) => {
+      const cat = getPrimaryClassCategory(cls);
+      const maxPeriodsPerDay =
+        cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+      const targetWeeklyCapacity = maxPeriodsPerDay * 5;
+
+      const itemsMap = new Map<
+        string,
+        {
+          subject: string;
+          teachersSet: Set<string>;
+          groupLabel: string;
+          periods: number;
+          isCoTaughtOrSplit: boolean;
+        }
+      >();
+
+      let totalPeriods = 0;
+
+      for (const slot of Object.values(cls.slots)) {
+        if (!slot.subject || !slot.subject.trim()) continue;
+        totalPeriods += 1;
+
+        const subj = slot.subject.trim();
+        const sKey = subj.toLowerCase();
+
+        // Build full teacher label including co-teachers or split teachers if any
+        const teacherLabel =
+          slot.subTeacher &&
+          slot.subTeacher.trim() &&
+          (!slot.subSubject ||
+            slot.subSubject.trim().toLowerCase() === sKey)
+            ? `${slot.teacher.trim()}, ${slot.subTeacher.trim()}`
+            : slot.teacher.trim();
+
+        const isCoOrSplit =
+          Boolean(slot.subTeacher && slot.subTeacher.trim()) ||
+          teacherLabel.includes('&') ||
+          teacherLabel.includes('/') ||
+          teacherLabel.includes('+') ||
+          Boolean(slot.jointWithClasses?.length);
+
+        const grpLabel =
+          slot.groupName ||
+          (slot.jointWithClasses?.length
+            ? `Cours commun (${[cls.name, ...slot.jointWithClasses].join(',')})`
+            : slot.subSubject &&
+              slot.subSubject.trim().toLowerCase() !== sKey
+            ? `Intercalé (${subj} / ${slot.subSubject})`
+            : 'Classe complète');
+
+        if (!itemsMap.has(sKey)) {
+          itemsMap.set(sKey, {
+            subject: subj,
+            teachersSet: new Set([teacherLabel]),
+            groupLabel: grpLabel,
+            periods: 0,
+            isCoTaughtOrSplit: isCoOrSplit,
+          });
+        } else {
+          const existing = itemsMap.get(sKey)!;
+          existing.teachersSet.add(teacherLabel);
+          if (isCoOrSplit) existing.isCoTaughtOrSplit = true;
+        }
+        itemsMap.get(sKey)!.periods += 1;
+      }
+
+      // Also include any subject from cls.subjectLoads that currently has 0 scheduled slots
+      if (cls.subjectLoads) {
+        for (const [sName, targetP] of Object.entries(cls.subjectLoads)) {
+          const sKey = sName.trim().toLowerCase();
+          if (!itemsMap.has(sKey) && targetP > 0) {
+            itemsMap.set(sKey, {
+              subject: sName.trim(),
+              teachersSet: new Set(['À affecter']),
+              groupLabel: 'Classe complète',
+              periods: targetP,
+              isCoTaughtOrSplit: false,
+            });
+            totalPeriods += targetP;
+          }
+        }
+      }
+
+      const items: ClassLoadLineItem[] = Array.from(itemsMap.entries())
+        .map(([key, val]) => ({
+          id: `${cls.id}__${key}`,
+          classId: cls.id,
+          className: cls.name,
+          subject: val.subject,
+          teacher: Array.from(val.teachersSet).join(', '),
+          groupLabel: val.groupLabel,
+          periods: val.periods,
+          isCoTaughtOrSplit: val.isCoTaughtOrSplit,
+        }))
+        .sort((a, b) => b.periods - a.periods);
+
+      return {
+        classId: cls.id,
+        className: cls.name,
+        section: cls.section,
+        category: cat,
+        categoryLabel: CATEGORY_SHORT_LABELS[cat],
+        room: cls.room,
+        totalPeriods,
+        targetWeeklyCapacity,
+        items,
       };
     });
 }
@@ -939,16 +1255,190 @@ export function computeSubjectsLoadReport(
 }
 
 /**
+ * Default Bell Schedule Groups organized by Class Group / Section
+ * ("pour les horaires il faut les mettre par groupe des classes ou section")
+ */
+export const DEFAULT_BELL_SCHEDULE_GROUPS: BellScheduleGroup[] = [
+  {
+    id: 'grp_kg_maternelle',
+    name: 'Groupe 1 — Maternelle (Pre-KG, KG1, KG2, PS, MS)',
+    category: 'KG_Primary',
+    sectionKey: 'KG',
+    description:
+      'Horaire Maternelle 6 périodes/jour (30 séances/semaine) avec 2 récréations adaptées.',
+    classNames: ['Pre-KG', 'KG1', 'KG2', 'PS', 'MS'],
+    maxPeriodsPerDay: 6,
+    rows: BELL_SCHEDULES.KG.map((r) => ({ ...r, durationMinutes: 40 })),
+  },
+  {
+    id: 'grp_kg3_gs',
+    name: 'Groupe 2 — Grande Section & KG3 (KG3, GS)',
+    category: 'French_Section',
+    sectionKey: 'KG3_GS',
+    description:
+      'Horaire Grande Section / KG3 7 périodes/jour (35 séances/semaine).',
+    classNames: ['KG3', 'GS'],
+    maxPeriodsPerDay: 7,
+    rows: BELL_SCHEDULES.KG3_GS.map((r) => ({ ...r, durationMinutes: 40 })),
+  },
+  {
+    id: 'grp_french_elem_ib',
+    name: 'Groupe 3 — French Section (PP1–PP5, PEI1–PEI5, DP1–DP2)',
+    category: 'French_Section',
+    sectionKey: 'Primary',
+    description:
+      'Horaire Section Française Élémentaire & Secondaire IB — 8 périodes/jour (40 séances/semaine).',
+    classNames: [
+      'PP1 (CP)',
+      'PP2 (CE1)',
+      'PP3 (CE2)',
+      'PP4 (CM1)',
+      'PP5 (CM2)',
+      'PEI1 Filles',
+      'PEI1 Garçons',
+      'PEI2',
+      'PEI3',
+      'PEI4',
+      'PEI5 / DP1',
+      'DP2',
+    ],
+    maxPeriodsPerDay: 8,
+    rows: BELL_SCHEDULES.Primary.map((r) => ({ ...r, durationMinutes: 45 })),
+  },
+  {
+    id: 'grp_primary_intl',
+    name: 'Groupe 4 — Primary Section International (G1 à G6)',
+    category: 'KG_Primary',
+    sectionKey: 'Primary',
+    description:
+      'Horaire Primaire International Filles & Garçons — 8 périodes/jour (40 séances/semaine).',
+    classNames: [
+      'G1 Girls',
+      'G1 Boys',
+      'G2 Girls',
+      'G2 Boys',
+      'G3 Girls',
+      'G3 Boys',
+      'G4 Girls',
+      'G4 Boys',
+      'G5 Girls',
+      'G5 Boys',
+      'G6 Girls',
+      'G6 Boys',
+    ],
+    maxPeriodsPerDay: 8,
+    rows: BELL_SCHEDULES.Primary.map((r) => ({ ...r, durationMinutes: 45 })),
+  },
+  {
+    id: 'grp_girls_sec',
+    name: 'Groupe 5 — Girls Section & American Girls (G7 à 12 Am.Girls)',
+    category: 'Girls_Section',
+    sectionKey: 'Secondary_Girls',
+    description:
+      'Horaire Secondaire Section Filles & American Section Girls — 8 périodes/jour (40 séances/semaine).',
+    classNames: [
+      'G7 Girls',
+      'G8 Girls',
+      'G9 Girls',
+      '10 Am.Girls',
+      '11 Am.Girls',
+      '12 Am.Girls',
+    ],
+    maxPeriodsPerDay: 8,
+    rows: BELL_SCHEDULES.Secondary_Girls.map((r) => ({
+      ...r,
+      durationMinutes: 45,
+    })),
+  },
+  {
+    id: 'grp_boys_sec',
+    name: 'Groupe 6 — Boys Section & American Boys (G7 à 12 Am.Boys)',
+    category: 'Boys_Section',
+    sectionKey: 'Secondary_Boys',
+    description:
+      'Horaire Secondaire Section Garçons & American Section Boys — 8 périodes/jour (40 séances/semaine).',
+    classNames: ['G7-G8 Boys', 'G9-10 Am.Boys', '11-12 Am.Boys'],
+    maxPeriodsPerDay: 8,
+    rows: BELL_SCHEDULES.Secondary_Boys.map((r) => ({
+      ...r,
+      durationMinutes: 45,
+    })),
+  },
+];
+
+/**
+ * Automatically recalculates period and break start/end clock strings
+ * for a BellScheduleGroup based on start hour/minute, period duration, and break durations.
+ */
+export function recalculateBellScheduleRows(params: {
+  startHour: number;
+  startMinute: number;
+  periodDurationMinutes: number;
+  maxPeriods: number;
+  break1AfterPeriod: number;
+  break1DurationMinutes: number;
+  break2AfterPeriod: number;
+  break2DurationMinutes: number;
+}): BellRow[] {
+  const fmt = (totalMins: number) => {
+    const h = Math.floor(totalMins / 60) % 24;
+    const m = totalMins % 60;
+    return `${String(h).padStart(2, '0')}h${String(m).padStart(2, '0')}`;
+  };
+
+  let cursor = params.startHour * 60 + params.startMinute;
+  const rows: BellRow[] = [];
+
+  for (let p = 1; p <= params.maxPeriods; p++) {
+    const endP = cursor + params.periodDurationMinutes;
+    rows.push({
+      type: 'period',
+      periodNumber: p,
+      label: `${p}${p === 1 ? 'ère' : 'ème'} Période`,
+      time: `${fmt(cursor)} - ${fmt(endP)}`,
+      durationMinutes: params.periodDurationMinutes,
+    });
+    cursor = endP;
+
+    if (p === params.break1AfterPeriod && params.break1DurationMinutes > 0) {
+      const endB1 = cursor + params.break1DurationMinutes;
+      rows.push({
+        type: 'break',
+        label: '1ère Pause / Récréation',
+        time: `${fmt(cursor)} - ${fmt(endB1)}`,
+        durationMinutes: params.break1DurationMinutes,
+      });
+      cursor = endB1;
+    }
+
+    if (p === params.break2AfterPeriod && params.break2DurationMinutes > 0) {
+      const endB2 = cursor + params.break2DurationMinutes;
+      rows.push({
+        type: 'break',
+        label: '2ème Pause / Prière',
+        time: `${fmt(cursor)} - ${fmt(endB2)}`,
+        durationMinutes: params.break2DurationMinutes,
+      });
+      cursor = endB2;
+    }
+  }
+
+  return rows;
+}
+
+/**
  * Generates an official printable A4 Landscape HTML/PDF report for:
- * - Teachers Load ("Imprimer Load Teachers")
- * - Subjects Load ("Imprimer Load Subjects")
+ * - 'teachers_load' : Exact Image 1 grouped layout (Professeur | Classe | Groupe | Matière | Nombre par semaine | Somme)
+ * - 'classes_load'  : Exact Image 2 grouped layout (Classe | Matière | Professeur | Groupe | Nombre par semaine | Somme des séances)
+ * - 'subjects_load' : Global Subjects Load Matrix
  */
 export function generatePrintableLoadReportHtml(
-  mode: 'teachers_load' | 'subjects_load',
+  mode: 'teachers_load' | 'classes_load' | 'subjects_load',
   teacherRows: TeacherLoadRow[],
   subjectRows: SubjectLoadRow[],
   categoryFilter: SchoolCategory,
-  schoolYear: string
+  schoolYear: string,
+  classBlocks: ClassLoadBlock[] = []
 ): string {
   const esc = (s: string) =>
     String(s || '')
@@ -958,66 +1448,144 @@ export function generatePrintableLoadReportHtml(
 
   const title =
     mode === 'teachers_load'
-      ? `ÉTAT OFFICIEL DES CHARGES HORAIRES ENSEIGNANTS (TEACHERS LOAD)`
-      : `ÉTAT OFFICIEL DES VOLUMES HORAIRES PAR MATIÈRE & CLASSE (SUBJECTS LOAD)`;
+      ? `TABLEAU OFFICIEL DES CHARGES ENSEIGNANTS (LOAD TEACHERS)`
+      : mode === 'classes_load'
+      ? `TABLEAU OFFICIEL DES CHARGES PAR CLASSE (LOAD CLASSES & SOMME DES SÉANCES)`
+      : `ÉTAT OFFICIEL DES VOLUMES HORAIRES PAR MATIÈRE (LOAD SUBJECTS)`;
 
-  const tableHtml =
-    mode === 'teachers_load'
-      ? `
-    <table>
+  let tableHtml = '';
+
+  if (mode === 'teachers_load') {
+    tableHtml = `
+    <table class="grouped-table">
       <thead>
         <tr>
-          <th style="width: 40px;">#</th>
-          <th style="width: 180px;">Enseignant(e)</th>
-          <th style="width: 130px;">Catégorie / Section</th>
-          <th style="width: 160px;">Matières Enseignées</th>
-          <th>Détail des Séances par Classe (Load par Classe)</th>
-          <th style="width: 95px; text-align: center;">Séances / Sem</th>
-          <th style="width: 90px; text-align: center;">Max Autorisé</th>
-          <th style="width: 95px; text-align: center;">Taux Charge</th>
+          <th style="width: 190px;">Professeur</th>
+          <th style="width: 170px;">Classe</th>
+          <th style="width: 220px;">Groupe</th>
+          <th>Matière</th>
+          <th style="width: 150px; text-align: center;">Nombre par semaine</th>
+          <th style="width: 120px; text-align: center;">Somme / Total</th>
         </tr>
       </thead>
       <tbody>
         ${teacherRows
-          .map(
-            (r, idx) => `
-          <tr>
-            <td style="text-align: center; font-family: monospace;">${idx + 1}</td>
-            <td style="font-weight: 700;">${esc(r.teacherName)}</td>
-            <td><span class="badge">${esc(r.sectionLabel)}</span></td>
-            <td>${esc(r.subjects.join(', '))}</td>
-            <td>
-              ${r.classBreakdown
-                .map(
-                  (b) =>
-                    `<span class="chip"><strong>${esc(b.className)}</strong> (${esc(
-                      b.subject
-                    )}: ${b.periods}p)</span>`
-                )
-                .join(' ')}
-            </td>
-            <td style="text-align: center; font-weight: 800; font-family: monospace; font-size: 13px;">
-              ${r.totalPeriods} p
-            </td>
-            <td style="text-align: center; font-family: monospace;">
-              ${r.maxPeriods} p
-            </td>
-            <td style="text-align: center; font-weight: 700; color: ${
-              r.totalPeriods > r.maxPeriods
-                ? '#b91c1c'
-                : r.totalPeriods < 8
-                ? '#b45309'
-                : '#15803d'
-            };">
-              ${r.utilizationPercent}%
-            </td>
-          </tr>
-        `
-          )
+          .filter((r) => r.lineItems.length > 0)
+          .map((r) => {
+            const span = r.lineItems.length;
+            const rowsHtml = r.lineItems
+              .map((item, idx) => {
+                const st = getSubjectVisualStyle(item.subject);
+                return `
+              <tr>
+                ${
+                  idx === 0
+                    ? `<td rowspan="${span}" class="merged-left">
+                        <div class="merged-title">${esc(r.teacherName)}</div>
+                        <div class="merged-sub">${esc(r.sectionLabel)}</div>
+                      </td>`
+                    : ''
+                }
+                <td style="font-weight: 700;">${esc(item.classesLabel)}</td>
+                <td style="color: #334155;">${esc(item.groupLabel)}</td>
+                <td style="text-align: center; font-weight: 700;">
+                  <span style="display:inline-block;padding:2px 8px;border-radius:3px;background:${
+                    st.bgHex
+                  };color:${st.textHex};border:1px solid ${st.borderHex};">
+                    ${esc(item.subject)}
+                  </span>
+                </td>
+                <td style="text-align: center; font-weight: 800; font-family: monospace; font-size: 13px;">
+                  ${item.periods}
+                </td>
+                ${
+                  idx === 0
+                    ? `<td rowspan="${span}" class="merged-total">
+                        <div class="total-num">${r.totalPeriods}</div>
+                        <div class="total-cap">Max: ${r.maxPeriods}p</div>
+                      </td>`
+                    : ''
+                }
+              </tr>`;
+              })
+              .join('');
+
+            return `
+              <tr class="block-sep"><td colspan="6"></td></tr>
+              ${rowsHtml}
+            `;
+          })
           .join('')}
       </tbody>
-    </table>`
-      : `
+    </table>`;
+  } else if (mode === 'classes_load') {
+    tableHtml = `
+    <table class="grouped-table">
+      <thead>
+        <tr>
+          <th style="width: 160px;">Classe</th>
+          <th style="width: 180px;">Matière</th>
+          <th>Professeur / Enseignant</th>
+          <th style="width: 190px;">Groupe / Mode</th>
+          <th style="width: 150px; text-align: center;">Nombre par semaine</th>
+          <th style="width: 130px; text-align: center;">Somme des séances</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${classBlocks
+          .filter((b) => b.items.length > 0)
+          .map((b) => {
+            const span = b.items.length;
+            const rowsHtml = b.items
+              .map((item, idx) => {
+                const st = getSubjectVisualStyle(item.subject);
+                return `
+              <tr>
+                ${
+                  idx === 0
+                    ? `<td rowspan="${span}" class="merged-left">
+                        <div class="merged-title">${esc(b.className)}</div>
+                        <div class="merged-sub">${esc(b.categoryLabel)} · ${esc(
+                        b.room
+                      )}</div>
+                      </td>`
+                    : ''
+                }
+                <td style="font-weight: 700;">
+                  <span style="display:inline-block;width:10px;height:10px;background:${
+                    st.bgHex
+                  };border:1px solid ${
+                  st.borderHex
+                };border-radius:2px;margin-right:6px;vertical-align:middle;"></span>
+                  ${esc(item.subject)}
+                </td>
+                <td style="font-weight: 600;">${esc(item.teacher)}</td>
+                <td style="color: #475569;">${esc(item.groupLabel)}</td>
+                <td style="text-align: center; font-weight: 800; font-family: monospace; font-size: 13px;">
+                  ${item.periods}
+                </td>
+                ${
+                  idx === 0
+                    ? `<td rowspan="${span}" class="merged-total">
+                        <div class="total-num">${b.totalPeriods}</div>
+                        <div class="total-cap">Cible: ${b.targetWeeklyCapacity}p</div>
+                      </td>`
+                    : ''
+                }
+              </tr>`;
+              })
+              .join('');
+
+            return `
+              <tr class="block-sep"><td colspan="6"></td></tr>
+              ${rowsHtml}
+            `;
+          })
+          .join('')}
+      </tbody>
+    </table>`;
+  } else {
+    tableHtml = `
     <table>
       <thead>
         <tr>
@@ -1069,6 +1637,7 @@ export function generatePrintableLoadReportHtml(
           .join('')}
       </tbody>
     </table>`;
+  }
 
   return `<!DOCTYPE html>
 <html lang="fr">
@@ -1082,12 +1651,18 @@ export function generatePrintableLoadReportHtml(
     .toolbar { display: flex; justify-content: space-between; align-items: center; background: #0f172a; color: #fff; padding: 10px 16px; border-radius: 6px; margin-bottom: 14px; }
     .toolbar button { background: #0284c7; color: #fff; border: none; padding: 8px 16px; border-radius: 5px; font-weight: 700; cursor: pointer; }
     .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 12px; }
-    .header h1 { margin: 0; font-size: 18px; text-transform: uppercase; letter-spacing: 0.4px; }
+    .header h1 { margin: 0; font-size: 17px; text-transform: uppercase; letter-spacing: 0.4px; }
     .header p { margin: 3px 0 0; font-size: 11px; color: #475569; }
     table { width: 100%; border-collapse: collapse; font-size: 11px; }
-    th, td { border: 1px solid #334155; padding: 6px 8px; text-align: left; vertical-align: middle; }
-    th { background: #f1f5f9; font-weight: 800; text-transform: uppercase; font-size: 10px; color: #0f172a; }
-    tr:nth-child(even) td { background: #f8fafc; }
+    th, td { border: 1px solid #1e293b; padding: 5px 8px; text-align: left; vertical-align: middle; }
+    th { background: #e2e8f0; font-weight: 800; text-transform: uppercase; font-size: 10.5px; color: #0f172a; }
+    .merged-left { background: #cbd5e1 !important; text-align: center; vertical-align: middle; border: 1.5px solid #0f172a; }
+    .merged-title { font-weight: 800; font-style: italic; font-size: 13px; color: #0f172a; }
+    .merged-sub { font-size: 9.5px; color: #334155; margin-top: 3px; font-weight: 600; }
+    .merged-total { background: #f8fafc !important; text-align: center; vertical-align: middle; border: 1.5px solid #0f172a; }
+    .total-num { font-size: 18px; font-weight: 900; font-family: monospace; color: #0f172a; }
+    .total-cap { font-size: 9.5px; color: #475569; margin-top: 2px; font-weight: 600; }
+    .block-sep td { background: #94a3b8 !important; height: 6px; padding: 0 !important; border: none !important; }
     .badge { display: inline-block; padding: 2px 6px; background: #e0f2fe; color: #0369a1; border-radius: 4px; font-weight: 700; font-size: 10px; }
     .chip { display: inline-block; margin: 1px 3px 1px 0; padding: 2px 5px; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 3px; font-size: 10px; }
     @media print { .toolbar { display: none !important; } body { padding: 0; } }

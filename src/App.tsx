@@ -70,6 +70,7 @@ import {
   SECTION_LABELS,
 } from './data/alkawtharDefaults';
 import {
+  BellScheduleGroup,
   DayOfWeek,
   LessonSlot,
   NotificationEntry,
@@ -88,10 +89,14 @@ import { LoadsAndManagementWorkspace } from './components/LoadsAndManagementWork
 import {
   CATEGORY_SHORT_LABELS,
   classMatchesCategory,
+  computeClassesLoadReport,
   computeSubjectsLoadReport,
   computeTeachersLoadReport,
+  DEFAULT_BELL_SCHEDULE_GROUPS,
+  detectIntercalatedSessions,
   generatePrintableEnsembleHtml,
   generatePrintableLoadReportHtml,
+  TeacherLoadLineItem,
   teacherMatchesCategory,
 } from './utils/timetableAnalytics';
 import {
@@ -211,6 +216,9 @@ export default function App() {
   );
   const [constraints, setConstraints] =
     useState<ConstraintRule[]>(DEFAULT_CONSTRAINTS);
+  const [bellScheduleGroups, setBellScheduleGroups] = useState<
+    BellScheduleGroup[]
+  >(DEFAULT_BELL_SCHEDULE_GROUPS);
 
   // Undo / Redo History Stack & Best Snapshot
   const [historyPast, setHistoryPast] = useState<SchoolClass[][]>([]);
@@ -247,7 +255,7 @@ export default function App() {
   // Sub-tabs inside Teachers & Loads Module
   const [teacherSubTab, setTeacherSubTab] = useState<
     'directory' | 'loads_subjects' | 'availability' | 'substitutes'
-  >('directory');
+  >('loads_subjects');
 
   // Substitute / Absence Finder State
   const [absentTeacherId, setAbsentTeacherId] = useState<string>(
@@ -792,6 +800,32 @@ export default function App() {
     }
     return set;
   }, [conflicts, selectedClass]);
+
+  const teacherLoadRows = useMemo(
+    () => computeTeachersLoadReport(teachers, classes, selectedCategory),
+    [teachers, classes, selectedCategory]
+  );
+
+  const classLoadBlocks = useMemo(
+    () => computeClassesLoadReport(classes, selectedCategory),
+    [classes, selectedCategory]
+  );
+
+  const subjectLoadRows = useMemo(
+    () => computeSubjectsLoadReport(classes, subjectConfigs, selectedCategory),
+    [classes, subjectConfigs, selectedCategory]
+  );
+
+  const intercalatedSessions = useMemo(
+    () => detectIntercalatedSessions(classes),
+    [classes]
+  );
+
+  const selectedClassBellGroup = useMemo(() => {
+    return bellScheduleGroups.find((g) =>
+      g.classNames.includes(selectedClass.name)
+    );
+  }, [bellScheduleGroups, selectedClass]);
 
   const filteredClasses = useMemo(() => {
     return classes.filter((c) => {
@@ -1419,13 +1453,406 @@ export default function App() {
     await saveClassToStore({ ...cls, slots: nextSlots }, [key]);
   };
 
-  // Print or Download Official Load Report (Load Teachers / Load Subjects)
-  const handlePrintLoadReport = (mode: 'teachers_load' | 'subjects_load') => {
+  // Update a specific Subject + Teacher Load in a Class (used by Load Subjects & Quick Add)
+  const handleUpdateSubjectClassLoad = async (
+    classId: string,
+    subjectName: string,
+    teacherName: string,
+    targetPeriods: number,
+    groupName?: string
+  ) => {
+    const cls = classes.find((c) => c.id === classId);
+    if (!cls) return;
+    const nextSlots = { ...cls.slots };
+    const matchingKeys = Object.entries(nextSlots)
+      .filter(
+        ([, s]) =>
+          s.subject.trim().toLowerCase() === subjectName.trim().toLowerCase() &&
+          (!teacherName ||
+            s.teacher.trim().toLowerCase() === teacherName.trim().toLowerCase())
+      )
+      .map(([k]) => k);
+
+    const currentCount = matchingKeys.length;
+    const delta = targetPeriods - currentCount;
+    const effectiveTeacher =
+      teacherName.trim() ||
+      (matchingKeys.length > 0
+        ? nextSlots[matchingKeys[0]].teacher
+        : 'Enseignant');
+
+    if (delta > 0) {
+      const maxP =
+        cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+      let added = 0;
+      for (const day of DAYS_OF_WEEK) {
+        for (let p = 1; p <= maxP; p++) {
+          if (added >= delta) break;
+          const k = `${day}_${p}`;
+          if (!nextSlots[k]) {
+            nextSlots[k] = {
+              subject: subjectName.trim(),
+              teacher: effectiveTeacher,
+              room: cls.room,
+              groupName: groupName || 'Classe complète',
+            };
+            added++;
+          }
+        }
+      }
+    } else if (delta < 0) {
+      const toRemove = Math.min(Math.abs(delta), matchingKeys.length);
+      for (let i = 0; i < toRemove; i++) {
+        const keyToDelete = matchingKeys[matchingKeys.length - 1 - i];
+        delete nextSlots[keyToDelete];
+      }
+    }
+
+    await saveClassToStore({
+      ...cls,
+      slots: nextSlots,
+      subjectLoads: {
+        ...(cls.subjectLoads || {}),
+        [subjectName.trim()]: Math.max(0, targetPeriods),
+      },
+    });
+    appendAuditLog(
+      `Mise à jour Load (${cls.name})`,
+      `${subjectName} (${effectiveTeacher}) -> ${targetPeriods} séances/sem.`
+    );
+  };
+
+  // Inline Modification of a Row in Load Classes Table (Image 2)
+  const handleModifyClassLoadItem = async (params: {
+    classId: string;
+    oldSubject: string;
+    oldTeacher: string;
+    newSubject: string;
+    newTeacher: string;
+    newPeriods: number;
+    newGroupLabel: string;
+  }) => {
+    const cls = classes.find((c) => c.id === params.classId);
+    if (!cls) return;
+    const nextSlots = { ...cls.slots };
+
+    const matchingKeys: string[] = [];
+    for (const [k, slot] of Object.entries(nextSlots)) {
+      const matchPrimary =
+        slot.subject.trim().toLowerCase() ===
+          params.oldSubject.trim().toLowerCase() &&
+        slot.teacher.trim().toLowerCase() ===
+          params.oldTeacher.trim().toLowerCase();
+      if (matchPrimary) {
+        matchingKeys.push(k);
+      }
+    }
+
+    // Update existing matching slots with new subject, teacher, and group
+    for (const k of matchingKeys) {
+      nextSlots[k] = {
+        ...nextSlots[k],
+        subject: params.newSubject.trim(),
+        teacher: params.newTeacher.trim(),
+        groupName: params.newGroupLabel,
+      };
+    }
+
+    const delta = params.newPeriods - matchingKeys.length;
+    if (delta > 0) {
+      const maxP =
+        cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+      let added = 0;
+      for (const day of DAYS_OF_WEEK) {
+        for (let p = 1; p <= maxP; p++) {
+          if (added >= delta) break;
+          const k = `${day}_${p}`;
+          if (!nextSlots[k]) {
+            nextSlots[k] = {
+              subject: params.newSubject.trim(),
+              teacher: params.newTeacher.trim(),
+              room: cls.room,
+              groupName: params.newGroupLabel,
+            };
+            added++;
+          }
+        }
+      }
+    } else if (delta < 0) {
+      const toRemove = Math.min(Math.abs(delta), matchingKeys.length);
+      for (let i = 0; i < toRemove; i++) {
+        const keyToDelete = matchingKeys[matchingKeys.length - 1 - i];
+        delete nextSlots[keyToDelete];
+      }
+    }
+
+    await saveClassToStore({
+      ...cls,
+      slots: nextSlots,
+    });
+    appendAuditLog(
+      `Modification Load Classe (${cls.name})`,
+      `${params.newSubject} (${params.newTeacher}) : ${params.newPeriods}p/sem`
+    );
+  };
+
+  // Inline Modification of a Grouped Line Item in Load Teachers Table (Image 1)
+  const handleModifyTeacherLoadLine = async (params: {
+    teacherName: string;
+    oldItem: TeacherLoadLineItem;
+    newClassIds: string[];
+    newSubject: string;
+    newGroupLabel: string;
+    newPeriodsPerClass: number;
+  }) => {
+    const oldSet = new Set(params.oldItem.classIds);
+    const newSet = new Set(params.newClassIds);
+    const isMulti = params.newClassIds.length > 1;
+    const jointNames = isMulti
+      ? classes
+          .filter((c) => newSet.has(c.id))
+          .map((c) => c.name)
+      : undefined;
+
+    const nextClasses = classes.map((cls) => {
+      const wasInOld = oldSet.has(cls.id);
+      const isInNew = newSet.has(cls.id);
+      if (!wasInOld && !isInNew) return cls;
+
+      const nextSlots = { ...cls.slots };
+
+      // If class was removed from this teacher's line item, delete matching slots
+      if (wasInOld && !isInNew) {
+        for (const [k, slot] of Object.entries(nextSlots)) {
+          if (
+            slot.teacher.trim().toLowerCase() ===
+              params.teacherName.trim().toLowerCase() &&
+            slot.subject.trim().toLowerCase() ===
+              params.oldItem.subject.trim().toLowerCase()
+          ) {
+            delete nextSlots[k];
+          }
+        }
+        return { ...cls, slots: nextSlots };
+      }
+
+      // Class is in newClassIds: update or create up to newPeriodsPerClass slots
+      const matchingKeys = Object.entries(nextSlots)
+        .filter(
+          ([, slot]) =>
+            slot.teacher.trim().toLowerCase() ===
+              params.teacherName.trim().toLowerCase() &&
+            slot.subject.trim().toLowerCase() ===
+              params.oldItem.subject.trim().toLowerCase()
+        )
+        .map(([k]) => k);
+
+      for (const k of matchingKeys) {
+        nextSlots[k] = {
+          ...nextSlots[k],
+          subject: params.newSubject.trim(),
+          teacher: params.teacherName,
+          groupName: params.newGroupLabel,
+          jointWithClasses: jointNames
+            ? jointNames.filter((n) => n !== cls.name)
+            : undefined,
+        };
+      }
+
+      const delta = params.newPeriodsPerClass - matchingKeys.length;
+      if (delta > 0) {
+        const maxP =
+          cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+        let added = 0;
+        for (const day of DAYS_OF_WEEK) {
+          for (let p = 1; p <= maxP; p++) {
+            if (added >= delta) break;
+            const k = `${day}_${p}`;
+            if (!nextSlots[k]) {
+              nextSlots[k] = {
+                subject: params.newSubject.trim(),
+                teacher: params.teacherName,
+                room: cls.room,
+                groupName: params.newGroupLabel,
+                jointWithClasses: jointNames
+                  ? jointNames.filter((n) => n !== cls.name)
+                  : undefined,
+              };
+              added++;
+            }
+          }
+        }
+      } else if (delta < 0) {
+        const toRemove = Math.min(Math.abs(delta), matchingKeys.length);
+        for (let i = 0; i < toRemove; i++) {
+          const keyToDelete = matchingKeys[matchingKeys.length - 1 - i];
+          delete nextSlots[keyToDelete];
+        }
+      }
+
+      return { ...cls, slots: nextSlots };
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+    appendAuditLog(
+      `Modification Load Teacher (${params.teacherName})`,
+      `${params.newSubject} sur ${params.newClassIds.length} classe(s) -> ${params.newPeriodsPerClass}p/sem.`
+    );
+  };
+
+  // Manager Express Tool 1: Clone a Class's Entire Curriculum/Load to Target Classes
+  const handleCloneClassLoadToClasses = async (
+    sourceClassId: string,
+    targetClassIds: string[],
+    keepTeachers: boolean
+  ) => {
+    const srcCls = classes.find((c) => c.id === sourceClassId);
+    if (!srcCls || targetClassIds.length === 0) return;
+
+    const targetSet = new Set(targetClassIds);
+    const nextClasses = classes.map((cls) => {
+      if (!targetSet.has(cls.id)) return cls;
+      const clonedSlots: Record<string, LessonSlot> = {};
+      for (const [k, s] of Object.entries(srcCls.slots)) {
+        clonedSlots[k] = {
+          ...s,
+          teacher: keepTeachers ? s.teacher : 'À affecter',
+          room: cls.room,
+        };
+      }
+      return {
+        ...cls,
+        slots: clonedSlots,
+        subjectLoads: { ...(srcCls.subjectLoads || {}) },
+      };
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+    appendAuditLog(
+      `Clonage Load Classe (${srcCls.name})`,
+      `Programme copié vers ${targetClassIds.length} classe(s).`
+    );
+    await triggerRealtimeNotification(
+      `Programme de ${srcCls.name} cloné`,
+      `Les matières et volumes horaires de ${srcCls.name} ont été appliqués à ${targetClassIds.length} classe(s).`,
+      'schedule_updated',
+      'all'
+    );
+  };
+
+  // Manager Express Tool 2: Global Replace Teacher or Subject across Category
+  const handleGlobalReplaceTeacherOrSubject = async (params: {
+    mode: 'teacher' | 'subject';
+    fromValue: string;
+    toValue: string;
+    categoryFilter: SchoolCategory;
+  }) => {
+    const fromLower = params.fromValue.trim().toLowerCase();
+    const toClean = params.toValue.trim();
+    if (!fromLower || !toClean) return;
+
+    let countReplaced = 0;
+    const nextClasses = classes.map((cls) => {
+      if (!classMatchesCategory(cls, params.categoryFilter)) return cls;
+      const nextSlots = { ...cls.slots };
+      for (const [k, s] of Object.entries(nextSlots)) {
+        if (
+          params.mode === 'teacher' &&
+          s.teacher.trim().toLowerCase() === fromLower
+        ) {
+          nextSlots[k] = { ...s, teacher: toClean };
+          countReplaced++;
+        } else if (
+          params.mode === 'subject' &&
+          s.subject.trim().toLowerCase() === fromLower
+        ) {
+          nextSlots[k] = { ...s, subject: toClean };
+          countReplaced++;
+        }
+      }
+      return { ...cls, slots: nextSlots };
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+    appendAuditLog(
+      `Remplacement Global (${params.mode === 'teacher' ? 'Enseignant' : 'Matière'})`,
+      `${params.fromValue} -> ${toClean} (${countReplaced} séances mises à jour).`
+    );
+    await triggerRealtimeNotification(
+      `Remplacement Global effectué`,
+      `"${params.fromValue}" remplacé par "${toClean}" sur ${countReplaced} séances.`,
+      'schedule_updated',
+      toClean
+    );
+  };
+
+  // Manager Express Tool 3: Auto-Complete All Missing Sessions across Classes
+  const handleAutoCompleteAllClassesSchedules = async (
+    categoryFilter: SchoolCategory
+  ) => {
+    let totalFilled = 0;
+    const nextClasses = classes.map((cls) => {
+      if (!classMatchesCategory(cls, categoryFilter)) return cls;
+      const maxP =
+        cls.section === 'KG' ? 6 : cls.section === 'KG3_GS' ? 7 : 8;
+      const nextSlots = { ...cls.slots };
+
+      // Collect existing subject/teacher pairs in this class to distribute balanced sessions
+      const existingPairs = Object.values(nextSlots).map((s) => ({
+        subject: s.subject,
+        teacher: s.teacher,
+      }));
+      const fallbackPair = existingPairs[0] || {
+        subject: cls.section === 'KG' ? 'Montessori / Activité' : 'Étude Dirigée',
+        teacher: teachers[0]?.name || 'Prof. Référent',
+      };
+
+      let pairIdx = 0;
+      for (const day of DAYS_OF_WEEK) {
+        for (let p = 1; p <= maxP; p++) {
+          const k = `${day}_${p}`;
+          if (!nextSlots[k]) {
+            const chosen =
+              existingPairs.length > 0
+                ? existingPairs[pairIdx % existingPairs.length]
+                : fallbackPair;
+            nextSlots[k] = {
+              subject: chosen.subject,
+              teacher: chosen.teacher,
+              room: cls.room,
+              groupName: 'Classe complète',
+            };
+            pairIdx++;
+            totalFilled++;
+          }
+        }
+      }
+      return { ...cls, slots: nextSlots };
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+    appendAuditLog(
+      `Auto-Complétion des Emplois du Temps`,
+      `${totalFilled} créneaux complétés automatiquement (${CATEGORY_SHORT_LABELS[categoryFilter]}).`
+    );
+    await triggerRealtimeNotification(
+      `Emplois du temps complétés automatiquement`,
+      `${totalFilled} séances ajoutées pour atteindre la somme hebdomadaire cible dans chaque classe.`,
+      'ai_generated',
+      'all'
+    );
+  };
+
+  // Print or Download Official Load Report (Load Teachers / Load Classes / Load Subjects)
+  const handlePrintLoadReport = (
+    mode: 'teachers_load' | 'classes_load' | 'subjects_load'
+  ) => {
     const teacherRows = computeTeachersLoadReport(
       teachers,
       classes,
       selectedCategory
     );
+    const classBlocks = computeClassesLoadReport(classes, selectedCategory);
     const subjectRows = computeSubjectsLoadReport(
       classes,
       subjectConfigs,
@@ -1436,15 +1863,24 @@ export default function App() {
       teacherRows,
       subjectRows,
       selectedCategory,
-      schoolYear
+      schoolYear,
+      classBlocks
     );
     const filename =
       mode === 'teachers_load'
         ? `AlKawthar_Load_Teachers_${selectedCategory}_${schoolYear}.html`
+        : mode === 'classes_load'
+        ? `AlKawthar_Load_Classes_${selectedCategory}_${schoolYear}.html`
         : `AlKawthar_Load_Subjects_${selectedCategory}_${schoolYear}.html`;
     handleDownloadFile(html, filename, 'text/html');
     appendAuditLog(
-      `Impression ${mode === 'teachers_load' ? 'Load Teachers' : 'Load Subjects'}`,
+      `Impression ${
+        mode === 'teachers_load'
+          ? 'Load Teachers'
+          : mode === 'classes_load'
+          ? 'Load Classes'
+          : 'Load Subjects'
+      }`,
       `Rapport HTML/PDF Paysage généré (${CATEGORY_SHORT_LABELS[selectedCategory]}).`
     );
   };
@@ -2396,7 +2832,7 @@ export default function App() {
                 >
                   <BookOpen className="w-4 h-4 text-amber-400" />
                   <span>
-                    Matières, Enseignants, Loads & Cours Communs / Intercalés
+                    Tableaux Load Teachers, Load Classes & Horaires par Groupe
                   </span>
                 </button>
               </div>
@@ -2410,6 +2846,14 @@ export default function App() {
                 >
                   <Printer className="w-3.5 h-3.5 text-sky-700" />
                   <span>Imprimer Load Teachers</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handlePrintLoadReport('classes_load')}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 text-indigo-700" />
+                  <span>Imprimer Load Classes</span>
                 </button>
                 <button
                   type="button"
@@ -2443,31 +2887,84 @@ export default function App() {
               />
             )}
 
-            {/* SUB-MODE B: LOADS, MATIÈRES, ENSEIGNANTS & COURS COMMUNS / INTERCALÉS */}
+            {/* SUB-MODE B: LOADS, MATIÈRES, ENSEIGNANTS & HORAIRES PAR GROUPE */}
             {editorSubMode === 'loads' && (
               <LoadsAndManagementWorkspace
                 classes={classes}
                 teachers={teachers}
-                subjectConfigs={subjectConfigs}
-                rooms={rooms}
+                teacherLoadRows={teacherLoadRows}
+                classLoadBlocks={classLoadBlocks}
+                subjectLoadRows={subjectLoadRows}
+                intercalatedSessions={intercalatedSessions}
+                bellScheduleGroups={bellScheduleGroups}
                 selectedCategory={selectedCategory}
                 onSelectCategory={setSelectedCategory}
-                onAddSubjectWithClasses={handleAddSubjectWithClasses}
-                onAddNewTeacher={handleAddNewTeacher}
-                onAdjustClassSubjectLoad={handleAdjustClassSubjectLoad}
-                onAssembleClassesOrTeachers={handleAssembleClassesOrTeachers}
-                onRemoveTeacherSession={handleRemoveTeacherSession}
-                onUpdateTeacherMaxLoad={(teacherId, maxLoad) => {
-                  const found = teachers.find((t) => t.id === teacherId);
-                  if (found) {
-                    saveTeacherToStore({
-                      ...found,
-                      maxPeriodsPerWeek: maxLoad,
-                    });
-                  }
+                onUpdateSubjectClassLoad={handleUpdateSubjectClassLoad}
+                onModifyClassLoadItem={handleModifyClassLoadItem}
+                onModifyTeacherLoadLine={handleModifyTeacherLoadLine}
+                onCloneClassLoadToClasses={handleCloneClassLoadToClasses}
+                onGlobalReplaceTeacherOrSubject={
+                  handleGlobalReplaceTeacherOrSubject
+                }
+                onAutoCompleteAllClassesSchedules={
+                  handleAutoCompleteAllClassesSchedules
+                }
+                onUpdateBellScheduleGroups={setBellScheduleGroups}
+                onAddSubjectToClasses={(payload) =>
+                  handleAddSubjectWithClasses({
+                    subjectName: payload.subjectName,
+                    category:
+                      payload.category === 'ALL'
+                        ? 'French_Section'
+                        : payload.category,
+                    weeklyPeriods: payload.weeklyPeriods,
+                    durationMinutes: 45,
+                    weight: 4,
+                    preferMorning: true,
+                    teacherName: payload.teacherName,
+                    subTeacherName: payload.coTeacherName,
+                    targetClassIds: payload.classIds,
+                    autoScheduleInClasses: true,
+                  })
+                }
+                onAddOrUpdateTeacherWithSessions={(payload) => {
+                  handleAddNewTeacher({
+                    name: payload.name,
+                    category:
+                      selectedCategory === 'ALL'
+                        ? 'French_Section'
+                        : selectedCategory,
+                    subjects: [payload.primarySubject],
+                    maxPeriodsPerWeek: payload.maxPeriodsPerWeek,
+                    initialClassId: payload.allocations[0]?.classId,
+                    initialSubject: payload.allocations[0]?.subject,
+                    initialPeriods: payload.allocations[0]?.periods,
+                  });
                 }}
-                onPrintLoadReport={handlePrintLoadReport}
-                darkMode={darkMode}
+                onCreateJointOrIntercalatedSession={(payload) =>
+                  handleAssembleClassesOrTeachers({
+                    mode:
+                      payload.mode === 'joint_classes'
+                        ? 'joint_classes'
+                        : 'co_teachers',
+                    classAId: payload.classIdA,
+                    classBId: payload.classIdB,
+                    day: payload.day,
+                    period: payload.period,
+                    subjectA: payload.subjectA,
+                    teacherA: payload.teacherA,
+                    subjectB: payload.subjectB,
+                    teacherB: payload.teacherB,
+                    room: payload.room,
+                  })
+                }
+                onPrintLoadTeachers={() =>
+                  handlePrintLoadReport('teachers_load')
+                }
+                onPrintLoadClasses={() => handlePrintLoadReport('classes_load')}
+                onPrintLoadSubjects={() =>
+                  handlePrintLoadReport('subjects_load')
+                }
               />
             )}
 
@@ -2782,6 +3279,8 @@ export default function App() {
                       subtitle={`${selectedCampus} · ${SCHOOL_INFO.subtitle} · Scénario ${scenario.toUpperCase()}`}
                       section={selectedClass.section}
                       slots={selectedClass.slots}
+                      customBellRows={selectedClassBellGroup?.rows}
+                      bellGroupName={selectedClassBellGroup?.name}
                       editable={roleMode !== 'teacher'}
                       conflictSlotKeys={selectedClassConflictKeys}
                       lockedSlotKeys={
@@ -2883,6 +3382,13 @@ export default function App() {
                   <span>Imprimer Load Teachers</span>
                 </button>
                 <button
+                  onClick={() => handlePrintLoadReport('classes_load')}
+                  className="px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                >
+                  <Printer className="w-3.5 h-3.5 text-indigo-700" />
+                  <span>Imprimer Load Classes</span>
+                </button>
+                <button
                   onClick={() => handlePrintLoadReport('subjects_load')}
                   className="px-3 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
@@ -2904,31 +3410,84 @@ export default function App() {
               </div>
             </div>
 
-            {/* SUB-TAB: LOADS, MATIÈRES, ENSEIGNANTS & COURS COMMUNS */}
+            {/* SUB-TAB: LOADS, MATIÈRES, ENSEIGNANTS, CLASSES & HORAIRES PAR GROUPE */}
             {teacherSubTab === 'loads_subjects' && (
               <LoadsAndManagementWorkspace
                 classes={classes}
                 teachers={teachers}
-                subjectConfigs={subjectConfigs}
-                rooms={rooms}
+                teacherLoadRows={teacherLoadRows}
+                classLoadBlocks={classLoadBlocks}
+                subjectLoadRows={subjectLoadRows}
+                intercalatedSessions={intercalatedSessions}
+                bellScheduleGroups={bellScheduleGroups}
                 selectedCategory={selectedCategory}
                 onSelectCategory={setSelectedCategory}
-                onAddSubjectWithClasses={handleAddSubjectWithClasses}
-                onAddNewTeacher={handleAddNewTeacher}
-                onAdjustClassSubjectLoad={handleAdjustClassSubjectLoad}
-                onAssembleClassesOrTeachers={handleAssembleClassesOrTeachers}
-                onRemoveTeacherSession={handleRemoveTeacherSession}
-                onUpdateTeacherMaxLoad={(teacherId, maxLoad) => {
-                  const found = teachers.find((t) => t.id === teacherId);
-                  if (found) {
-                    saveTeacherToStore({
-                      ...found,
-                      maxPeriodsPerWeek: maxLoad,
-                    });
-                  }
+                onUpdateSubjectClassLoad={handleUpdateSubjectClassLoad}
+                onModifyClassLoadItem={handleModifyClassLoadItem}
+                onModifyTeacherLoadLine={handleModifyTeacherLoadLine}
+                onCloneClassLoadToClasses={handleCloneClassLoadToClasses}
+                onGlobalReplaceTeacherOrSubject={
+                  handleGlobalReplaceTeacherOrSubject
+                }
+                onAutoCompleteAllClassesSchedules={
+                  handleAutoCompleteAllClassesSchedules
+                }
+                onUpdateBellScheduleGroups={setBellScheduleGroups}
+                onAddSubjectToClasses={(payload) =>
+                  handleAddSubjectWithClasses({
+                    subjectName: payload.subjectName,
+                    category:
+                      payload.category === 'ALL'
+                        ? 'French_Section'
+                        : payload.category,
+                    weeklyPeriods: payload.weeklyPeriods,
+                    durationMinutes: 45,
+                    weight: 4,
+                    preferMorning: true,
+                    teacherName: payload.teacherName,
+                    subTeacherName: payload.coTeacherName,
+                    targetClassIds: payload.classIds,
+                    autoScheduleInClasses: true,
+                  })
+                }
+                onAddOrUpdateTeacherWithSessions={(payload) => {
+                  handleAddNewTeacher({
+                    name: payload.name,
+                    category:
+                      selectedCategory === 'ALL'
+                        ? 'French_Section'
+                        : selectedCategory,
+                    subjects: [payload.primarySubject],
+                    maxPeriodsPerWeek: payload.maxPeriodsPerWeek,
+                    initialClassId: payload.allocations[0]?.classId,
+                    initialSubject: payload.allocations[0]?.subject,
+                    initialPeriods: payload.allocations[0]?.periods,
+                  });
                 }}
-                onPrintLoadReport={handlePrintLoadReport}
-                darkMode={darkMode}
+                onCreateJointOrIntercalatedSession={(payload) =>
+                  handleAssembleClassesOrTeachers({
+                    mode:
+                      payload.mode === 'joint_classes'
+                        ? 'joint_classes'
+                        : 'co_teachers',
+                    classAId: payload.classIdA,
+                    classBId: payload.classIdB,
+                    day: payload.day,
+                    period: payload.period,
+                    subjectA: payload.subjectA,
+                    teacherA: payload.teacherA,
+                    subjectB: payload.subjectB,
+                    teacherB: payload.teacherB,
+                    room: payload.room,
+                  })
+                }
+                onPrintLoadTeachers={() =>
+                  handlePrintLoadReport('teachers_load')
+                }
+                onPrintLoadClasses={() => handlePrintLoadReport('classes_load')}
+                onPrintLoadSubjects={() =>
+                  handlePrintLoadReport('subjects_load')
+                }
               />
             )}
 
@@ -4068,6 +4627,14 @@ export default function App() {
                   >
                     <Printer className="w-4 h-4 text-sky-700" />
                     <span>Imprimer Load Teachers (PDF)</span>
+                  </button>
+
+                  <button
+                    onClick={() => handlePrintLoadReport('classes_load')}
+                    className="px-3.5 py-2.5 text-xs font-semibold text-indigo-900 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 rounded-lg flex items-center justify-center gap-2"
+                  >
+                    <Printer className="w-4 h-4 text-indigo-700" />
+                    <span>Imprimer Load Classes (PDF)</span>
                   </button>
 
                   <button
