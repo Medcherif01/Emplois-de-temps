@@ -29,6 +29,12 @@ import {
   CATEGORY_SHORT_LABELS,
   getSubjectVisualStyle,
 } from '../utils/timetableAnalytics';
+import {
+  SortGroupControlBar,
+  ClassSortField,
+  ClassGroupField,
+  SortDirection,
+} from './SortGroupControlBar';
 
 const DAYS: DayOfWeek[] = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi'];
 
@@ -184,6 +190,63 @@ export const ClassAddEditDeleteModal: React.FC<ClassAddEditDeleteModalProps> = (
         (c.category && c.category.toLowerCase().includes(q))
     );
   }, [classes, classFilter]);
+
+  // User-selected class sorting & grouping state
+  const [classSortField, setClassSortField] = useState<ClassSortField>('name');
+  const [classSortDir, setClassSortDir] = useState<SortDirection>('asc');
+  const [classGroupField, setClassGroupField] = useState<ClassGroupField>('none');
+
+  const sortedAndGroupedClasses = useMemo(() => {
+    const list = [...filteredClasses].sort((a, b) => {
+      let cmp = 0;
+      if (classSortField === 'name') {
+        cmp = a.name.localeCompare(b.name);
+      } else if (classSortField === 'total_periods') {
+        const countA = Object.values(a.slots).filter((s) => Boolean(s?.subject)).length;
+        const countB = Object.values(b.slots).filter((s) => Boolean(s?.subject)).length;
+        cmp = countA - countB;
+      } else if (classSortField === 'fill_rate') {
+        const targetA = a.section === 'KG' ? 30 : a.section === 'KG3_GS' ? 35 : 40;
+        const targetB = b.section === 'KG' ? 30 : b.section === 'KG3_GS' ? 35 : 40;
+        const fillA = Object.values(a.slots).filter((s) => Boolean(s?.subject)).length / targetA;
+        const fillB = Object.values(b.slots).filter((s) => Boolean(s?.subject)).length / targetB;
+        cmp = fillA - fillB;
+      } else if (classSortField === 'level') {
+        cmp = (a.category || '').localeCompare(b.category || '');
+      } else if (classSortField === 'room') {
+        cmp = (a.room || '').localeCompare(b.room || '');
+      }
+      return classSortDir === 'asc' ? cmp : -cmp;
+    });
+
+    if (classGroupField === 'none') {
+      return [{ groupName: '', classes: list }];
+    }
+
+    const map = new Map<string, typeof list>();
+    list.forEach((cls) => {
+      let g = 'Autres';
+      if (classGroupField === 'cycle') {
+        g = CATEGORY_LABELS[cls.category || 'French_Section'] || 'Général';
+      } else if (classGroupField === 'section') {
+        g =
+          cls.section === 'Secondary_Girls'
+            ? 'Section Filles'
+            : cls.section === 'Secondary_Boys'
+            ? 'Section Garçons'
+            : 'Section Mixte / Maternelle';
+      } else if (classGroupField === 'timing_group') {
+        g = cls.timingGroupId || 'Horaires Standards';
+      }
+      if (!map.has(g)) map.set(g, []);
+      map.get(g)!.push(cls);
+    });
+
+    return Array.from(map.entries()).map(([groupName, classes]) => ({
+      groupName,
+      classes,
+    }));
+  }, [filteredClasses, classSortField, classSortDir, classGroupField]);
 
   if (!isOpen) return null;
 
@@ -542,6 +605,21 @@ export const ClassAddEditDeleteModal: React.FC<ClassAddEditDeleteModalProps> = (
              ========================================================== */}
           {mode === 'edit' && currentClass && (
             <div className="space-y-6">
+              {/* User-selected Class Sort & Group Controls */}
+              <SortGroupControlBar
+                mode="classes"
+                currentSortField={classSortField}
+                sortDirection={classSortDir}
+                onSortChange={(f, d) => {
+                  setClassSortField(f as ClassSortField);
+                  setClassSortDir(d);
+                }}
+                currentGroupField={classGroupField}
+                onGroupChange={(g) => setClassGroupField(g as ClassGroupField)}
+                totalCount={filteredClasses.length}
+                darkMode={darkMode}
+              />
+
               {/* Class Switcher & Search Bar */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/70 dark:bg-slate-800/40">
                 <div className="flex-1 min-w-0 flex items-center gap-2">
@@ -551,14 +629,29 @@ export const ClassAddEditDeleteModal: React.FC<ClassAddEditDeleteModalProps> = (
                     onChange={(e) => setSelectedClassId(e.target.value)}
                     className="w-full max-w-sm px-3 py-1.5 text-xs font-bold rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
                   >
-                    {filteredClasses.map((c) => {
-                      const count = Object.values(c.slots).filter((s) => Boolean(s.subject)).length;
-                      return (
-                        <option key={c.id} value={c.id}>
-                          {c.name} · {count} séances ({c.room})
-                        </option>
-                      );
-                    })}
+                    {sortedAndGroupedClasses.map((group, idx) =>
+                      group.groupName ? (
+                        <optgroup key={group.groupName || idx} label={group.groupName}>
+                          {group.classes.map((c) => {
+                            const count = Object.values(c.slots).filter((s) => Boolean(s.subject)).length;
+                            return (
+                              <option key={c.id} value={c.id}>
+                                {c.name} · {count} séances ({c.room})
+                              </option>
+                            );
+                          })}
+                        </optgroup>
+                      ) : (
+                        group.classes.map((c) => {
+                          const count = Object.values(c.slots).filter((s) => Boolean(s.subject)).length;
+                          return (
+                            <option key={c.id} value={c.id}>
+                              {c.name} · {count} séances ({c.room})
+                            </option>
+                          );
+                        })
+                      )
+                    )}
                   </select>
                 </div>
 

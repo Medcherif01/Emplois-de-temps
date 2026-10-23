@@ -6,8 +6,10 @@ import {
   Calendar,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Coffee,
+  Eye,
   FileSpreadsheet,
   Layers,
   LayoutGrid,
@@ -106,6 +108,7 @@ interface AscTimetablesRibbonAndDialogsProps {
   ) => void;
   onOpenClassManager?: () => void;
   onOpenTeachersDirectory?: () => void;
+  onOpenDiagnosticModal?: () => void;
   canUndo?: boolean;
   onUndo?: () => void;
   undoCount?: number;
@@ -130,6 +133,7 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
   onOpenModal,
   onOpenClassManager,
   onOpenTeachersDirectory,
+  onOpenDiagnosticModal,
   onAssignAssistantToClassOrSubject,
   onRemoveAssistantFromClassOrSubject,
   onUpdateTeacherTimeOff,
@@ -207,6 +211,7 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
   const [lesGroup, setLesGroup] = useState('Classe complète');
   const [lesPattern, setLesPattern] = useState('1+1+1+1');
   const [lesRoom, setLesRoom] = useState('');
+  const [openDropdown, setOpenDropdown] = useState<'pedagogy' | 'rules' | 'engine' | 'export' | null>(null);
 
   const allTeacherNames = useMemo(() => {
     const s = new Set<string>();
@@ -322,14 +327,14 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
           RIBBON BAR STYLE aSc TIMETABLES (ACCÈS DIRECT À TOUS LES RÉGLAGES)
          ===================================================================== */}
       <div
-        className={`border-b px-4 py-2 no-print shadow-2xs ${
+        className={`border-b px-4 py-2 no-print shadow-2xs relative z-40 ${
           darkMode
             ? 'bg-slate-900 border-slate-800 text-slate-100'
             : 'bg-slate-100/90 border-slate-300 text-slate-900'
         }`}
       >
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-2">
-          {/* Left group: Précédent (Undo), Core aSc Data & Co-Teaching Buttons */}
+        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-2.5">
+          {/* LEFT: Précédent (Undo) + 4 Structured Action Menus */}
           <div className="flex flex-wrap items-center gap-1.5">
             {onUndo && (
               <button
@@ -344,101 +349,374 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
               </button>
             )}
 
-            <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-1 rounded bg-slate-800 text-amber-300 mr-1">
-              Barre aSc TimeTables
-            </span>
+            <div className="h-5 w-px bg-slate-300 dark:bg-slate-700 mx-1 hidden sm:block" />
 
-            {onOpenClassManager && (
+            {/* MENU 1: GESTION PÉDAGOGIQUE */}
+            <div className="relative">
               <button
                 type="button"
-                onClick={onOpenClassManager}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black bg-indigo-600 hover:bg-indigo-700 text-white shadow-2xs transition-all cursor-pointer"
-                title="Ajouter ou supprimer une classe, configurer ses matières et enseignants"
+                onClick={() => setOpenDropdown(openDropdown === 'pedagogy' ? null : 'pedagogy')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                  openDropdown === 'pedagogy'
+                    ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
+                    : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border-slate-300 dark:border-slate-700 hover:bg-indigo-50 dark:hover:bg-slate-700'
+                }`}
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>+ Classes / Matières ({classes.length})</span>
+                <Layers className="w-3.5 h-3.5 text-indigo-500" />
+                <span>Pédagogie & Classes</span>
+                <ChevronDown className="w-3 h-3 text-slate-400" />
               </button>
-            )}
 
-            {onOpenTeachersDirectory && (
+              {openDropdown === 'pedagogy' && (
+                <div
+                  className="absolute left-0 top-full mt-1 w-64 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                  onMouseLeave={() => setOpenDropdown(null)}
+                >
+                  {onOpenClassManager && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onOpenClassManager();
+                        setOpenDropdown(null);
+                      }}
+                      className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4 text-indigo-600" />
+                      <div>
+                        <div>+ Gérer Classes & Matières</div>
+                        <div className="text-[10px] text-slate-400 font-normal">Ajouter, supprimer, volumes horaires</div>
+                      </div>
+                    </button>
+                  )}
+
+                  {onOpenTeachersDirectory && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onOpenTeachersDirectory();
+                        setOpenDropdown(null);
+                      }}
+                      className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-teal-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                    >
+                      <Users className="w-4 h-4 text-teal-600" />
+                      <div>
+                        <div>Répertoire & Charges Enseignants</div>
+                        <div className="text-[10px] text-slate-400 font-normal">Charges, quotas et matières enseignées</div>
+                      </div>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenModal('co_teaching_assistant');
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-teal-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <UserPlus className="w-4 h-4 text-teal-600" />
+                    <div>
+                      <div>Enseignant + Assistant(e)</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Co-enseignement simultané</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenModal('asc_lesson_creator');
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-sky-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <BookOpen className="w-4 h-4 text-sky-600" />
+                    <div>
+                      <div>+ Nouveau Contrat Leçon aSc</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Cours double (2h), groupes ou multi-classes</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* MENU 2: RÈGLES & HORAIRES */}
+            <div className="relative">
               <button
                 type="button"
-                onClick={onOpenTeachersDirectory}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-teal-50 text-slate-800 border border-slate-300 shadow-2xs transition-all cursor-pointer"
-                title="Afficher pour chaque enseignant ce qu'il enseigne et son nombre de séances"
+                onClick={() => setOpenDropdown(openDropdown === 'rules' ? null : 'rules')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                  openDropdown === 'rules'
+                    ? 'bg-rose-600 text-white border-rose-700 shadow-xs'
+                    : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border-slate-300 dark:border-slate-700 hover:bg-rose-50 dark:hover:bg-slate-700'
+                }`}
               >
-                <Users className="w-3.5 h-3.5 text-teal-600" />
-                <span>Enseignants & Charges ({teachers.length})</span>
+                <ShieldCheck className="w-3.5 h-3.5 text-rose-500" />
+                <span>Règles & Horaires</span>
+                <ChevronDown className="w-3 h-3 text-slate-400" />
               </button>
-            )}
 
-            <button
-              type="button"
-              onClick={() => onOpenModal('co_teaching_assistant')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-extrabold bg-teal-600 hover:bg-teal-700 text-white shadow-2xs transition-all cursor-pointer"
-              title="Mettre 2 enseignants en même temps : un Enseignant Principal + un Assistant(e) avec lui"
-            >
-              <UserPlus className="w-3.5 h-3.5" />
-              <span>Enseignant + Assistant(e) ({activeAssistantAssignments.length})</span>
-            </button>
+              {openDropdown === 'rules' && (
+                <div
+                  className="absolute left-0 top-full mt-1 w-64 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                  onMouseLeave={() => setOpenDropdown(null)}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenModal('constraints_timeoff');
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-rose-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-4 h-4 text-rose-600" />
+                    <div>
+                      <div>Contraintes & Temps Libre (✕ / ?)</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Créneaux interdits ou à éviter</div>
+                    </div>
+                  </button>
 
-            <button
-              type="button"
-              onClick={() => onOpenModal('asc_lesson_creator')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-sky-50 text-slate-800 border border-slate-300 shadow-2xs transition-all cursor-pointer"
-              title="Créer un contrat de cours aSc (Simple, Double 2p, Multi-classes ou avec Assistant)"
-            >
-              <BookOpen className="w-3.5 h-3.5 text-sky-600" />
-              <span>+ Contrat Leçon aSc</span>
-            </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenModal('horaires_bells');
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <Clock className="w-4 h-4 text-amber-600" />
+                    <div>
+                      <div>Horaires & Sonneries par Cycle</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Début des cours, durées des périodes</div>
+                    </div>
+                  </button>
 
-            <button
-              type="button"
-              onClick={() => onOpenModal('constraints_timeoff')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-rose-50 text-slate-800 border border-slate-300 shadow-2xs transition-all cursor-pointer"
-              title="Contraintes strictes/souples et Grille Temps Libre (Vert / Jaune ? / Rouge X)"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-rose-600" />
-              <span>Contraintes & Temps Libre</span>
-            </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenModal('breaks_recreations');
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-orange-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <Coffee className="w-4 h-4 text-orange-600" />
+                    <div>
+                      <div>Breaks & Récréations</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Pauses, prière et surveillance</div>
+                    </div>
+                  </button>
 
-            <button
-              type="button"
-              onClick={() => onOpenModal('horaires_bells')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-amber-50 text-slate-800 border border-slate-300 shadow-2xs transition-all cursor-pointer"
-              title="Gérer les horaires et durées des périodes par groupe de classes ou section"
-            >
-              <Clock className="w-3.5 h-3.5 text-amber-600" />
-              <span>Horaires / Sonneries</span>
-            </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onOpenModal('all_settings');
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-violet-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <Settings className="w-4 h-4 text-violet-600" />
+                    <div>
+                      <div>Tous les Réglages Généraux</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Verrouillage global et paramètres aSc</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
 
-            <button
-              type="button"
-              onClick={() => onOpenModal('breaks_recreations')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-orange-50 text-slate-800 border border-slate-300 shadow-2xs transition-all cursor-pointer"
-              title="Configurer les Pauses (Breaks), Récréations, Prière et Surveillance"
-            >
-              <Coffee className="w-3.5 h-3.5 text-orange-600" />
-              <span>Breaks / Pauses</span>
-            </button>
+            {/* MENU 3: MOTEUR & GÉNÉRATION */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setOpenDropdown(openDropdown === 'engine' ? null : 'engine')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                  openDropdown === 'engine'
+                    ? 'bg-emerald-600 text-white border-emerald-700 shadow-xs'
+                    : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border-slate-300 dark:border-slate-700 hover:bg-emerald-50 dark:hover:bg-slate-700'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Moteur & Génération</span>
+                <ChevronDown className="w-3 h-3 text-slate-400" />
+              </button>
 
-            <button
-              type="button"
-              onClick={() => onOpenModal('all_settings')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-violet-50 text-slate-800 border border-slate-300 shadow-2xs transition-all cursor-pointer"
-              title="Tous les réglages généraux de l'école, verrouillage global et paramètres aSc"
-            >
-              <Settings className="w-3.5 h-3.5 text-violet-600" />
-              <span>Tous les Réglages</span>
-            </button>
+              {openDropdown === 'engine' && (
+                <div
+                  className="absolute left-0 top-full mt-1 w-68 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                  onMouseLeave={() => setOpenDropdown(null)}
+                >
+                  {onOpenDiagnosticModal && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onOpenDiagnosticModal();
+                        setOpenDropdown(null);
+                      }}
+                      className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                    >
+                      <Sparkles className="w-4 h-4 text-indigo-600" />
+                      <div>
+                        <div className="font-bold text-indigo-700 dark:text-indigo-400">Diagnostic Pré-Vol & Faisabilité</div>
+                        <div className="text-[10px] text-slate-400 font-normal">Audit avant génération et contrôle des quotas</div>
+                      </div>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onRunAutoCompleteAndOptimize();
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-emerald-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <Play className="w-4 h-4 text-emerald-600 fill-current" />
+                    <div>
+                      <div>Lancer la Génération Automatique</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Résolution CP-SAT de toutes les classes</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onLockOrUnlockAllClasses(true);
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <Lock className="w-4 h-4 text-slate-600" />
+                    <div>
+                      <div>Verrouiller Tous les Cours Placés</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Empêche toute modification automatique</div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onLockOrUnlockAllClasses(false);
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                  >
+                    <Unlock className="w-4 h-4 text-amber-600" />
+                    <div>
+                      <div>Déverrouiller Tout le Campus</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Libère les cadenas pour le solveur</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* MENU 4: EXPORT & IMPRESSIONS */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setOpenDropdown(openDropdown === 'export' ? null : 'export')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                  openDropdown === 'export'
+                    ? 'bg-emerald-700 text-white border-emerald-800 shadow-xs'
+                    : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border-slate-300 dark:border-slate-700 hover:bg-emerald-50 dark:hover:bg-slate-700'
+                }`}
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Export & Impression</span>
+                <ChevronDown className="w-3 h-3 text-slate-400" />
+              </button>
+
+              {openDropdown === 'export' && (
+                <div
+                  className="absolute left-0 top-full mt-1 w-64 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                  onMouseLeave={() => setOpenDropdown(null)}
+                >
+                  {onExportExcel && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onExportExcel('teachers_load');
+                          setOpenDropdown(null);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-emerald-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                      >
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                        <div>
+                          <div>Excel Teachers (Design Fidèle)</div>
+                          <div className="text-[10px] text-slate-400 font-normal">Avec couleurs et styles exacts</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onExportExcel('classes_load');
+                          setOpenDropdown(null);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                      >
+                        <FileSpreadsheet className="w-4 h-4 text-indigo-600" />
+                        <div>
+                          <div>Excel Classes (Design Fidèle)</div>
+                          <div className="text-[10px] text-slate-400 font-normal">Tableau récapitulatif par matière</div>
+                        </div>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onExportExcel('ensemble');
+                          setOpenDropdown(null);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-teal-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 cursor-pointer"
+                      >
+                        <FileSpreadsheet className="w-4 h-4 text-teal-600" />
+                        <div>
+                          <div>Excel Vue Ensemble Complète</div>
+                          <div className="text-[10px] text-slate-400 font-normal">Toutes les classes sur un seul classeur</div>
+                        </div>
+                      </button>
+                    </>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onPrintReport('ensemble');
+                      setOpenDropdown(null);
+                    }}
+                    className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-sky-50 dark:hover:bg-slate-800 flex items-center gap-2.5 text-slate-800 dark:text-slate-200 border-t border-slate-100 dark:border-slate-800 cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4 text-sky-600" />
+                    <div>
+                      <div>Imprimer PDF Paysage aSc</div>
+                      <div className="text-[10px] text-slate-400 font-normal">Sans coupure d'enseignant sur 2 pages</div>
+                    </div>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
-          {/* Right group: Direct Shortcuts to Load Teachers, Load Classes, Vue Ensemble & Auto-Generate */}
+          {/* RIGHT: Fast Direct Shortcuts to Main Views & Diagnostic */}
           <div className="flex flex-wrap items-center gap-1.5">
+            {onOpenDiagnosticModal && (
+              <button
+                type="button"
+                onClick={onOpenDiagnosticModal}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 shadow-2xs transition-all cursor-pointer"
+                title="Vérifier la faisabilité avant génération : surcharges, manques et contraintes"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Diagnostic Pré-vol</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={() => onSwitchToTab('editor', 'ensemble')}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white cursor-pointer"
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-white shadow-2xs cursor-pointer"
+              title="Afficher la Vue Ensemble de toutes les classes"
             >
               <LayoutGrid className="w-3.5 h-3.5 text-sky-400" />
               <span>Vue Ensemble</span>
@@ -447,32 +725,21 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
             <button
               type="button"
               onClick={() => onSwitchToTab('editor', 'loads')}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-indigo-700 hover:bg-indigo-800 text-white cursor-pointer"
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-700 hover:bg-indigo-800 text-white shadow-2xs cursor-pointer"
+              title="Afficher les tableaux récapitulatifs Load Teachers et Load Classes"
             >
               <Layers className="w-3.5 h-3.5 text-indigo-200" />
-              <span>Load Teachers & Classes</span>
+              <span>Tableaux Load</span>
             </button>
-
-            {onExportExcel && (
-              <button
-                type="button"
-                onClick={() => onExportExcel('teachers_load')}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white shadow-xs cursor-pointer"
-                title="Exporter les tableaux vers Excel avec le même design, couleurs et polices"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-                <span>Excel (Design)</span>
-              </button>
-            )}
 
             <button
               type="button"
               onClick={onRunAutoCompleteAndOptimize}
-              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-extrabold bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs cursor-pointer"
-              title="Générer et compléter automatiquement tous les emplois du temps"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-black bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs cursor-pointer"
+              title="Générer et compléter automatiquement tous les cours"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              <span>Générer Auto (aSc)</span>
+              <span>Générer Auto</span>
             </button>
           </div>
         </div>

@@ -18,6 +18,7 @@ interface GlobalSearchOmnibarProps {
   teachers: TeacherProfile[];
   onSelectClass: (classId: string) => void;
   onSelectTeacher: (teacherId: string) => void;
+  onOpenTeacherDetail?: (teacherId: string) => void;
   onOpenClassManager: () => void;
   onOpenTeachersDirectory: () => void;
   darkMode?: boolean;
@@ -28,6 +29,7 @@ export const GlobalSearchOmnibar: React.FC<GlobalSearchOmnibarProps> = ({
   teachers,
   onSelectClass,
   onSelectTeacher,
+  onOpenTeacherDetail,
   onOpenClassManager,
   onOpenTeachersDirectory,
   darkMode = false,
@@ -125,6 +127,17 @@ export const GlobalSearchOmnibar: React.FC<GlobalSearchOmnibarProps> = ({
   };
 
   const handleSelectTeacherItem = (teacherId: string) => {
+    if (onOpenTeacherDetail) {
+      onOpenTeacherDetail(teacherId);
+    } else {
+      onSelectTeacher(teacherId);
+    }
+    setIsOpen(false);
+    setQuery('');
+  };
+
+  const handleJumpToTimetable = (e: React.MouseEvent, teacherId: string) => {
+    e.stopPropagation();
     onSelectTeacher(teacherId);
     setIsOpen(false);
     setQuery('');
@@ -273,7 +286,7 @@ export const GlobalSearchOmnibar: React.FC<GlobalSearchOmnibarProps> = ({
                     <GraduationCap className="w-3 h-3 text-teal-500" />
                     <span>Enseignants ({matchingTeachers.length})</span>
                   </span>
-                  <span className="text-[10px] text-slate-400 lowercase">cliquer pour emploi du temps</span>
+                  <span className="text-[10px] text-slate-400 lowercase">cliquer pour fiche & modifier</span>
                 </div>
 
                 <div className="space-y-0.5 mt-0.5">
@@ -282,11 +295,11 @@ export const GlobalSearchOmnibar: React.FC<GlobalSearchOmnibarProps> = ({
                     const maxQuota = t.maxPeriodsPerWeek || 24;
 
                     return (
-                      <button
+                      <div
                         key={t.id}
-                        type="button"
                         onClick={() => handleSelectTeacherItem(t.id)}
                         className="w-full text-left px-3 py-2 rounded-lg hover:bg-teal-50 dark:hover:bg-teal-950/40 transition-colors flex items-center justify-between gap-3 group cursor-pointer"
+                        title="Cliquer pour afficher la fiche complète de cet enseignant, ses matières, classes et modifier ses séances"
                       >
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
@@ -308,9 +321,17 @@ export const GlobalSearchOmnibar: React.FC<GlobalSearchOmnibarProps> = ({
                           <span className="text-[11px] font-mono font-extrabold text-teal-700 dark:text-teal-400 bg-teal-50 dark:bg-teal-950 px-2 py-0.5 rounded tabular-nums">
                             {sessionCount} / {maxQuota}p
                           </span>
+                          <button
+                            type="button"
+                            onClick={(e) => handleJumpToTimetable(e, t.id)}
+                            className="px-2 py-0.5 rounded text-[10px] font-bold text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950 hover:bg-sky-100 dark:hover:bg-sky-900 transition-colors cursor-pointer"
+                            title="Ouvrir directement la grille horaire de cet enseignant"
+                          >
+                            Grille
+                          </button>
                           <ChevronRight className="w-3.5 h-3.5 text-slate-300 group-hover:text-teal-600 transition-colors" />
                         </div>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>

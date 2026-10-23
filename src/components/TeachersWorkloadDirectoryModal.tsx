@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clock,
   Download,
+  Edit3,
   Filter,
   GraduationCap,
   Layers,
@@ -29,6 +30,12 @@ import {
   teacherMatchesCategory,
 } from '../utils/timetableAnalytics';
 import { DAYS_OF_WEEK } from '../data/alkawtharDefaults';
+import {
+  SortGroupControlBar,
+  SortDirection,
+  TeacherSortField,
+  TeacherGroupField,
+} from './SortGroupControlBar';
 
 interface TeachersWorkloadDirectoryModalProps {
   isOpen: boolean;
@@ -38,6 +45,7 @@ interface TeachersWorkloadDirectoryModalProps {
   selectedCategory: SchoolCategory;
   onSelectCategory: (cat: SchoolCategory) => void;
   onSelectTeacherForTimetable?: (teacherId: string) => void;
+  onOpenTeacherDetail?: (teacherId: string) => void;
   onPrintTeacherReport?: () => void;
   darkMode?: boolean;
 }
@@ -52,6 +60,7 @@ export const TeachersWorkloadDirectoryModal: React.FC<
   selectedCategory,
   onSelectCategory,
   onSelectTeacherForTimetable,
+  onOpenTeacherDetail,
   onPrintTeacherReport,
   darkMode = false,
 }) => {
@@ -193,6 +202,59 @@ export const TeachersWorkloadDirectoryModal: React.FC<
     });
   }, [teacherCardsData, searchQuery, statusFilter]);
 
+  // User-selected sorting and grouping state
+  const [sortField, setSortField] = useState<TeacherSortField>('name');
+  const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+  const [groupField, setGroupField] = useState<TeacherGroupField>('none');
+
+  const sortedAndGroupedCards = useMemo(() => {
+    const list = [...filteredTeacherCards].sort((a, b) => {
+      let cmp = 0;
+      if (sortField === 'name') {
+        cmp = a.teacher.name.localeCompare(b.teacher.name);
+      } else if (sortField === 'total_periods') {
+        cmp = a.totalSessionsCount - b.totalSessionsCount;
+      } else if (sortField === 'utilization') {
+        cmp = a.utilization - b.utilization;
+      } else if (sortField === 'subject') {
+        cmp = (a.teacher.subjects[0] || '').localeCompare(b.teacher.subjects[0] || '');
+      } else if (sortField === 'classes_count') {
+        cmp = a.classesTaught.length - b.classesTaught.length;
+      }
+      return sortDirection === 'asc' ? cmp : -cmp;
+    });
+
+    if (groupField === 'none') {
+      return [{ groupName: '', cards: list }];
+    }
+
+    const groupsMap = new Map<string, typeof list>();
+    list.forEach((item) => {
+      let key = 'Autres';
+      if (groupField === 'subject') {
+        key = item.teacher.subjects[0] || 'Sans discipline';
+      } else if (groupField === 'status') {
+        key =
+          item.workloadStatus === 'overload'
+            ? 'En Surcharge (> quota)'
+            : item.workloadStatus === 'underload'
+            ? 'En Sous-charge (< 10 séances)'
+            : 'Charge Normale';
+      } else if (groupField === 'section') {
+        key = item.teacher.section || 'Général';
+      }
+      if (!groupsMap.has(key)) {
+        groupsMap.set(key, []);
+      }
+      groupsMap.get(key)!.push(item);
+    });
+
+    return Array.from(groupsMap.entries()).map(([groupName, cards]) => ({
+      groupName,
+      cards,
+    }));
+  }, [filteredTeacherCards, sortField, sortDirection, groupField]);
+
   if (!isOpen) return null;
 
   return (
@@ -299,176 +361,233 @@ export const TeachersWorkloadDirectoryModal: React.FC<
           </div>
         </div>
 
+        {/* User-selected Sort & Group Controller Bar */}
+        <div className="px-6 pt-3 pb-1 border-b border-slate-200 dark:border-slate-800">
+          <SortGroupControlBar
+            mode="teachers"
+            currentSortField={sortField}
+            sortDirection={sortDirection}
+            onSortChange={(field, dir) => {
+              setSortField(field as TeacherSortField);
+              setSortDirection(dir);
+            }}
+            currentGroupField={groupField}
+            onGroupChange={(grp) => setGroupField(grp as TeacherGroupField)}
+            totalCount={filteredTeacherCards.length}
+            darkMode={darkMode}
+          />
+        </div>
+
         {/* Teachers Cards List */}
-        <div className="p-6 overflow-y-auto space-y-4 flex-1">
+        <div className="p-6 overflow-y-auto space-y-6 flex-1">
           {filteredTeacherCards.length === 0 ? (
             <div className="p-12 text-center border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-2xl text-slate-500 text-xs">
               Aucun enseignant ne correspond à vos critères de recherche.
             </div>
           ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {filteredTeacherCards.map((card) => {
-                const { teacher, totalSessionsCount, maxCap, utilization, workloadStatus, subjectsList, dayDistribution } = card;
-
-                return (
-                  <div
-                    key={teacher.id}
-                    className={`rounded-xl border p-4.5 transition-all flex flex-col justify-between shadow-2xs ${
-                      darkMode
-                        ? 'bg-slate-800/80 border-slate-700 hover:border-teal-500'
-                        : 'bg-white border-slate-200 hover:border-teal-600 hover:shadow-sm'
-                    }`}
-                  >
-                    <div>
-                      {/* Top Header: Name, Section & Total Sessions Badge */}
-                      <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-700/80">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h3 className="text-sm font-black text-slate-900 dark:text-slate-100">
-                              {teacher.name}
-                            </h3>
-                            {teacher.isAssistant && (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300">
-                                Assistant(e)
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                            Section : {teacher.section} · Spécialité : {teacher.subjects.join(', ')}
-                          </p>
-                        </div>
-
-                        {/* Total Sessions Count Pill */}
-                        <div className="text-right shrink-0">
-                          <div className="inline-flex items-baseline gap-1 font-mono">
-                            <span className="text-lg font-black text-teal-700 dark:text-teal-400 tabular-nums">
-                              {totalSessionsCount}
-                            </span>
-                            <span className="text-xs text-slate-400 font-bold">
-                              / {maxCap}p
-                            </span>
-                          </div>
-                          <div className="text-[10px] font-bold mt-0.5">
-                            {workloadStatus === 'overload' ? (
-                              <span className="text-rose-600 dark:text-rose-400">⚠️ Surcharge ({utilization}%)</span>
-                            ) : workloadStatus === 'underload' ? (
-                              <span className="text-amber-600 dark:text-amber-400">Temps partiel ({utilization}%)</span>
-                            ) : (
-                              <span className="text-emerald-600 dark:text-emerald-400">Équilibré ({utilization}%)</span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Visual Load Progress Bar */}
-                      <div className="mt-2.5">
-                        <div className="w-full bg-slate-100 dark:bg-slate-700 h-1.5 rounded-full overflow-hidden">
-                          <div
-                            className={`h-full rounded-full transition-all ${
-                              workloadStatus === 'overload'
-                                ? 'bg-rose-500'
-                                : workloadStatus === 'underload'
-                                ? 'bg-amber-400'
-                                : 'bg-teal-500'
-                            }`}
-                            style={{ width: `${Math.min(100, utilization)}%` }}
-                          />
-                        </div>
-                      </div>
-
-                      {/* CE QU'IL ENSEIGNE (EXIGENCE UTILISATEUR) */}
-                      <div className="mt-3.5 space-y-2">
-                        <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
-                          <BookOpen className="w-3.5 h-3.5 text-teal-600" />
-                          <span>Matières & Classes enseignées :</span>
-                        </div>
-
-                        {subjectsList.length === 0 ? (
-                          <div className="text-xs text-slate-400 italic">
-                            Aucune séance actuellement affectée dans l'emploi du temps.
-                          </div>
-                        ) : (
-                          <div className="space-y-1.5">
-                            {subjectsList.map((subj) => {
-                              const style = getSubjectVisualStyle(subj.subject);
-                              return (
-                                <div
-                                  key={subj.subject}
-                                  className="p-2 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-200/60 dark:border-slate-800 text-xs"
-                                >
-                                  <div className="flex items-center justify-between gap-2 mb-1">
-                                    <span
-                                      className="inline-block px-2 py-0.5 rounded font-bold text-[11px]"
-                                      style={{
-                                        backgroundColor: style.bgHex,
-                                        color: style.textHex,
-                                        border: `1px solid ${style.borderHex}`,
-                                      }}
-                                    >
-                                      {subj.subject}
-                                    </span>
-                                    <span className="font-mono font-bold text-slate-700 dark:text-slate-300 tabular-nums">
-                                      {subj.totalSubjectPeriods} séance{subj.totalSubjectPeriods > 1 ? 's' : ''}/sem
-                                    </span>
-                                  </div>
-
-                                  {/* List of classes with their session count */}
-                                  <div className="flex flex-wrap gap-1.5 mt-1">
-                                    {subj.classes.map((cls) => (
-                                      <span
-                                        key={cls.classId}
-                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[11px] font-medium text-slate-800 dark:text-slate-200"
-                                      >
-                                        <span className="font-bold">{cls.className}</span>
-                                        <span className="font-mono font-black text-teal-700 dark:text-teal-400 tabular-nums">
-                                          ({cls.periods}p)
-                                        </span>
-                                        {cls.isAssistant && (
-                                          <span className="text-[9px] text-teal-600 font-semibold">(Assist.)</span>
-                                        )}
-                                      </span>
-                                    ))}
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Day by Day Breakdown */}
-                      <div className="mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px]">
-                        <span className="font-bold text-slate-500">Répartition :</span>
-                        <div className="flex items-center gap-2 font-mono">
-                          {DAYS_OF_WEEK.map((d) => (
-                            <span key={d} className="tabular-nums text-slate-700 dark:text-slate-300">
-                              <span className="text-slate-400">{d.slice(0, 3)}:</span>{' '}
-                              <strong>{dayDistribution[d]}</strong>
-                            </span>
-                          ))}
-                        </div>
-                      </div>
+            <div className="space-y-6">
+              {sortedAndGroupedCards.map((group, grpIdx) => (
+                <div key={group.groupName || grpIdx} className="space-y-3">
+                  {group.groupName && (
+                    <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-1.5">
+                      <span className="text-xs font-bold uppercase tracking-wider text-teal-700 dark:text-teal-400">
+                        {group.groupName}
+                      </span>
+                      <span className="text-[11px] text-slate-400 font-mono tabular-nums">
+                        ({group.cards.length} enseignant{group.cards.length > 1 ? 's' : ''})
+                      </span>
                     </div>
+                  )}
 
-                    {/* Bottom Action: Jump to Timetable */}
-                    {onSelectTeacherForTimetable && (
-                      <div className="mt-4 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-end">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onSelectTeacherForTimetable(teacher.id);
-                            onClose();
-                          }}
-                          className="px-3 py-1.5 text-xs font-bold text-teal-700 dark:text-teal-300 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 dark:hover:bg-teal-900 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {group.cards.map((card) => {
+                      const {
+                        teacher,
+                        totalSessionsCount,
+                        maxCap,
+                        utilization,
+                        workloadStatus,
+                        subjectsList,
+                        dayDistribution,
+                      } = card;
+
+                      return (
+                        <div
+                          key={teacher.id}
+                          className={`rounded-xl border p-4.5 transition-all flex flex-col justify-between shadow-2xs ${
+                            darkMode
+                              ? 'bg-slate-800/80 border-slate-700 hover:border-teal-500'
+                              : 'bg-white border-slate-200 hover:border-teal-600 hover:shadow-sm'
+                          }`}
                         >
-                          <Calendar className="w-3.5 h-3.5" />
-                          <span>Voir Grille Hebdomadaire</span>
-                        </button>
-                      </div>
-                    )}
+                          <div>
+                            {/* Top Header: Name, Section & Total Sessions Badge */}
+                            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-700/80">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <h3 className="text-sm font-black text-slate-900 dark:text-slate-100">
+                                    {teacher.name}
+                                  </h3>
+                                  {teacher.isAssistant && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300">
+                                      Assistant(e)
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                                  Section : {teacher.section} · Spécialité : {teacher.subjects.join(', ')}
+                                </p>
+                              </div>
+
+                              {/* Total Sessions Count */}
+                              <div className="text-right shrink-0">
+                                <div className="inline-flex items-baseline gap-1 font-mono">
+                                  <span className="text-lg font-black text-teal-700 dark:text-teal-400 tabular-nums">
+                                    {totalSessionsCount}
+                                  </span>
+                                  <span className="text-xs text-slate-400 font-bold">
+                                    / {maxCap}p
+                                  </span>
+                                </div>
+                                <div className="text-[10px] font-bold mt-0.5">
+                                  {workloadStatus === 'overload' ? (
+                                    <span className="text-rose-600 dark:text-rose-400">⚠️ Surcharge ({utilization}%)</span>
+                                  ) : workloadStatus === 'underload' ? (
+                                    <span className="text-amber-600 dark:text-amber-400">Temps partiel ({utilization}%)</span>
+                                  ) : (
+                                    <span className="text-emerald-600 dark:text-emerald-400">Équilibré ({utilization}%)</span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Visual Load Progress Bar */}
+                            <div className="mt-2.5">
+                              <div className="w-full bg-slate-100 dark:bg-slate-700 h-1.5 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full transition-all ${
+                                    workloadStatus === 'overload'
+                                      ? 'bg-rose-500'
+                                      : workloadStatus === 'underload'
+                                      ? 'bg-amber-400'
+                                      : 'bg-teal-500'
+                                  }`}
+                                  style={{ width: `${Math.min(100, utilization)}%` }}
+                                />
+                              </div>
+                            </div>
+
+                            {/* CE QU'IL ENSEIGNE */}
+                            <div className="mt-3.5 space-y-2">
+                              <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 flex items-center gap-1.5">
+                                <BookOpen className="w-3.5 h-3.5 text-teal-600" />
+                                <span>Matières & Classes enseignées :</span>
+                              </div>
+
+                              {subjectsList.length === 0 ? (
+                                <div className="text-xs text-slate-400 italic">
+                                  Aucune séance actuellement affectée dans l'emploi du temps.
+                                </div>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {subjectsList.map((subj) => {
+                                    const style = getSubjectVisualStyle(subj.subject);
+                                    return (
+                                      <div
+                                        key={subj.subject}
+                                        className="p-2 rounded-lg bg-slate-50 dark:bg-slate-900/50 border border-slate-200/60 dark:border-slate-800 text-xs"
+                                      >
+                                        <div className="flex items-center justify-between gap-2 mb-1">
+                                          <span
+                                            className="inline-block px-2 py-0.5 rounded font-bold text-[11px]"
+                                            style={{
+                                              backgroundColor: style.bgHex,
+                                              color: style.textHex,
+                                              border: `1px solid ${style.borderHex}`,
+                                            }}
+                                          >
+                                            {subj.subject}
+                                          </span>
+                                          <span className="font-mono font-bold text-slate-700 dark:text-slate-300 tabular-nums">
+                                            {subj.totalSubjectPeriods} séance{subj.totalSubjectPeriods > 1 ? 's' : ''}/sem
+                                          </span>
+                                        </div>
+
+                                        {/* List of classes with their session count */}
+                                        <div className="flex flex-wrap gap-1.5 mt-1">
+                                          {subj.classes.map((cls) => (
+                                            <span
+                                              key={cls.classId}
+                                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-[11px] font-medium text-slate-800 dark:text-slate-200"
+                                            >
+                                              <span className="font-bold">{cls.className}</span>
+                                              <span className="font-mono font-black text-teal-700 dark:text-teal-400 tabular-nums">
+                                                ({cls.periods}p)
+                                              </span>
+                                              {cls.isAssistant && (
+                                                <span className="text-[9px] text-teal-600 font-semibold">(Assist.)</span>
+                                              )}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Day by Day Breakdown */}
+                            <div className="mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px]">
+                              <span className="font-bold text-slate-500">Répartition :</span>
+                              <div className="flex items-center gap-2 font-mono">
+                                {DAYS_OF_WEEK.map((d) => (
+                                  <span key={d} className="tabular-nums text-slate-700 dark:text-slate-300">
+                                    <span className="text-slate-400">{d.slice(0, 3)}:</span>{' '}
+                                    <strong>{dayDistribution[d]}</strong>
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Dual Actions: Modify Teacher Sheet & Jump to Timetable */}
+                          <div className="mt-4 pt-2.5 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                            {onOpenTeacherDetail && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onOpenTeacherDetail(teacher.id);
+                                  onClose();
+                                }}
+                                className="px-2.5 py-1.5 text-xs font-bold text-sky-700 dark:text-sky-300 bg-sky-50 hover:bg-sky-100 dark:bg-sky-950/60 dark:hover:bg-sky-900 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
+                                title="Modifier les attributions de cet enseignant, ses matières et séances"
+                              >
+                                <Edit3 className="w-3.5 h-3.5 text-sky-600" />
+                                <span>Fiche & Modifier</span>
+                              </button>
+                            )}
+
+                            {onSelectTeacherForTimetable && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onSelectTeacherForTimetable(teacher.id);
+                                  onClose();
+                                }}
+                                className="px-2.5 py-1.5 text-xs font-bold text-teal-700 dark:text-teal-300 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 dark:hover:bg-teal-900 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer ml-auto"
+                              >
+                                <Calendar className="w-3.5 h-3.5" />
+                                <span>Voir Grille Hebdomadaire</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           )}
         </div>

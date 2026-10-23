@@ -93,6 +93,8 @@ import {
 import { ClassAddEditDeleteModal } from './components/ClassAddEditDeleteModal';
 import { TeachersWorkloadDirectoryModal } from './components/TeachersWorkloadDirectoryModal';
 import { GlobalSearchOmnibar } from './components/GlobalSearchOmnibar';
+import { TeacherDetailEditModal } from './components/TeacherDetailEditModal';
+import { TimetableDiagnosticModal } from './components/TimetableDiagnosticModal';
 import {
   CATEGORY_SHORT_LABELS,
   classMatchesCategory,
@@ -353,6 +355,11 @@ export default function App() {
   const [activeAscModal, setActiveAscModal] = useState<AscModalType>(null);
   const [showClassManagerModal, setShowClassManagerModal] = useState(false);
   const [showTeachersDirectoryModal, setShowTeachersDirectoryModal] = useState(false);
+  const [showTeacherDetailModal, setShowTeacherDetailModal] = useState(false);
+  const [activeDetailTeacherId, setActiveDetailTeacherId] = useState<string | null>(null);
+  const [showDiagnosticModal, setShowDiagnosticModal] = useState(false);
+  const [exportDropdownOpen, setExportDropdownOpen] = useState(false);
+  const [printDropdownOpen, setPrintDropdownOpen] = useState(false);
 
   // Cell Editor Modal
   const [editingCell, setEditingCell] = useState<{
@@ -3083,6 +3090,10 @@ export default function App() {
               setActiveTab('editor');
               setGridViewMode('teacher');
             }}
+            onOpenTeacherDetail={(teacherId) => {
+              setActiveDetailTeacherId(teacherId);
+              setShowTeacherDetailModal(true);
+            }}
             onOpenClassManager={() => setShowClassManagerModal(true)}
             onOpenTeachersDirectory={() => setShowTeachersDirectoryModal(true)}
             darkMode={darkMode}
@@ -3374,6 +3385,7 @@ export default function App() {
         onOpenModal={setActiveAscModal}
         onOpenClassManager={() => setShowClassManagerModal(true)}
         onOpenTeachersDirectory={() => setShowTeachersDirectoryModal(true)}
+        onOpenDiagnosticModal={() => setShowDiagnosticModal(true)}
         classes={classes}
         teachers={teachers}
         subjectConfigs={subjectConfigs}
@@ -3483,51 +3495,124 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Quick Print & Excel Export Load Reports */}
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleExportExcelLoadTeachers}
-                  className="px-2.5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-md flex items-center gap-1.5 shadow-xs cursor-pointer"
-                  title="Exporter le tableau Load Teachers avec design et couleurs vers Excel"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>Excel Teachers</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportExcelLoadClasses}
-                  className="px-2.5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-md flex items-center gap-1.5 shadow-xs cursor-pointer"
-                  title="Exporter le tableau Load Classes avec design et couleurs vers Excel"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>Excel Classes</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportExcelEnsemble}
-                  className="px-2.5 py-1.5 text-xs font-bold text-white bg-teal-700 hover:bg-teal-800 rounded-md flex items-center gap-1.5 shadow-xs cursor-pointer"
-                  title="Exporter la Vue Ensemble complète vers Excel"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>Excel Ensemble</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handlePrintLoadReport('teachers_load')}
-                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                >
-                  <Printer className="w-3.5 h-3.5 text-sky-700" />
-                  <span>Imprimer Teachers</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handlePrintLoadReport('classes_load')}
-                  className="px-2.5 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-md flex items-center gap-1.5 whitespace-nowrap shrink-0"
-                >
-                  <Printer className="w-3.5 h-3.5 text-indigo-700" />
-                  <span>Imprimer Classes</span>
-                </button>
+              {/* Clean Grouped Export & Print Menus */}
+              <div className="flex items-center gap-2">
+                {/* Excel Export Menu */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportDropdownOpen(!exportDropdownOpen);
+                      setPrintDropdownOpen(false);
+                    }}
+                    className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                    title="Exporter les tableaux vers Excel avec le design exact"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span>Exporter Excel</span>
+                  </button>
+
+                  {exportDropdownOpen && (
+                    <div
+                      className="absolute right-0 top-full mt-1 w-52 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                      onMouseLeave={() => setExportDropdownOpen(false)}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleExportExcelLoadTeachers();
+                          setExportDropdownOpen(false);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-emerald-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 flex items-center gap-2 cursor-pointer"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>Excel Load Teachers</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleExportExcelLoadClasses();
+                          setExportDropdownOpen(false);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 flex items-center gap-2 cursor-pointer"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Excel Load Classes</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handleExportExcelEnsemble();
+                          setExportDropdownOpen(false);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-teal-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 flex items-center gap-2 cursor-pointer"
+                      >
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-teal-600" />
+                        <span>Excel Vue Ensemble</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Print Reports Menu */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPrintDropdownOpen(!printDropdownOpen);
+                      setExportDropdownOpen(false);
+                    }}
+                    className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-sky-600" />
+                    <span>Imprimer Rapports</span>
+                  </button>
+
+                  {printDropdownOpen && (
+                    <div
+                      className="absolute right-0 top-full mt-1 w-56 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                      onMouseLeave={() => setPrintDropdownOpen(false)}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handlePrintLoadReport('teachers_load');
+                          setPrintDropdownOpen(false);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-sky-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 flex items-center gap-2 cursor-pointer"
+                      >
+                        <Printer className="w-3.5 h-3.5 text-sky-600" />
+                        <span>Imprimer Load Enseignants</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handlePrintLoadReport('classes_load');
+                          setPrintDropdownOpen(false);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-indigo-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 flex items-center gap-2 cursor-pointer"
+                      >
+                        <Printer className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Imprimer Load Classes</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          handlePrintEnsembleMatrix();
+                          setPrintDropdownOpen(false);
+                        }}
+                        className="w-full text-left px-3.5 py-2 text-xs font-semibold hover:bg-teal-50 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2 cursor-pointer"
+                      >
+                        <Printer className="w-3.5 h-3.5 text-teal-600" />
+                        <span>Imprimer Grille Complète aSc</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -5812,7 +5897,62 @@ export default function App() {
           setActiveTab('editor');
           setGridViewMode('teacher');
         }}
+        onOpenTeacherDetail={(teacherId) => {
+          setActiveDetailTeacherId(teacherId);
+          setShowTeacherDetailModal(true);
+        }}
         onPrintTeacherReport={() => handlePrintLoadReport('teachers_load')}
+        darkMode={darkMode}
+      />
+
+      {/* =====================================================================
+          MODAL: FICHE ENSEIGNANT DÉDIÉE (MATIÈRES, CLASSES, SÉANCES & MODIFICATION)
+         ===================================================================== */}
+      <TeacherDetailEditModal
+        isOpen={showTeacherDetailModal}
+        onClose={() => setShowTeacherDetailModal(false)}
+        teacherId={activeDetailTeacherId || selectedTeacherId}
+        teachers={teachers}
+        classes={classes}
+        onSaveTeacher={(updated) => saveTeacherToStore(updated)}
+        onSaveClass={(updated) => saveClassToStore(updated)}
+        onViewTeacherTimetable={(tId) => {
+          setSelectedTeacherId(tId);
+          setActiveTab('editor');
+          setGridViewMode('teacher');
+        }}
+        onOpenTimeOffSettings={(tId) => {
+          setSelectedTeacherId(tId);
+          setActiveAscModal('constraints_timeoff');
+        }}
+        darkMode={darkMode}
+      />
+
+      {/* =====================================================================
+          MODAL: DIAGNOSTIC PRÉ-VOL & ASSISTANT DE GÉNÉRATION CP-SAT
+         ===================================================================== */}
+      <TimetableDiagnosticModal
+        isOpen={showDiagnosticModal}
+        onClose={() => setShowDiagnosticModal(false)}
+        classes={classes}
+        teachers={teachers}
+        onOpenTeacherDetail={(tId) => {
+          setActiveDetailTeacherId(tId);
+          setShowTeacherDetailModal(true);
+        }}
+        onOpenClassManager={(cId) => {
+          if (cId) setSelectedClassId(cId);
+          setShowClassManagerModal(true);
+        }}
+        onRunGeneration={(options) =>
+          handleAutoCompleteAllClassesSchedules(options.category)
+        }
+        onLockAll={() => handleLockOrUnlockAllClasses(true)}
+        onUnlockAll={() => handleLockOrUnlockAllClasses(false)}
+        isAllLocked={
+          classes.length > 0 &&
+          classes.every((c) => (lockedSlotsByClass[c.id] || []).length >= 25)
+        }
         darkMode={darkMode}
       />
 
