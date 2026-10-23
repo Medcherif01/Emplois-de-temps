@@ -104,6 +104,8 @@ interface AscTimetablesRibbonAndDialogsProps {
   onPrintReport: (
     mode: 'teachers_load' | 'classes_load' | 'subjects_load' | 'ensemble'
   ) => void;
+  onOpenClassManager?: () => void;
+  onOpenTeachersDirectory?: () => void;
   canUndo?: boolean;
   onUndo?: () => void;
   undoCount?: number;
@@ -126,6 +128,8 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
   scenario,
   activeModal,
   onOpenModal,
+  onOpenClassManager,
+  onOpenTeachersDirectory,
   onAssignAssistantToClassOrSubject,
   onRemoveAssistantFromClassOrSubject,
   onUpdateTeacherTimeOff,
@@ -343,6 +347,30 @@ export const AscTimetablesRibbonAndDialogs: React.FC<
             <span className="text-[10px] font-extrabold uppercase tracking-wider px-2 py-1 rounded bg-slate-800 text-amber-300 mr-1">
               Barre aSc TimeTables
             </span>
+
+            {onOpenClassManager && (
+              <button
+                type="button"
+                onClick={onOpenClassManager}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black bg-indigo-600 hover:bg-indigo-700 text-white shadow-2xs transition-all cursor-pointer"
+                title="Ajouter ou supprimer une classe, configurer ses matières et enseignants"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>+ Classes / Matières ({classes.length})</span>
+              </button>
+            )}
+
+            {onOpenTeachersDirectory && (
+              <button
+                type="button"
+                onClick={onOpenTeachersDirectory}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-white hover:bg-teal-50 text-slate-800 border border-slate-300 shadow-2xs transition-all cursor-pointer"
+                title="Afficher pour chaque enseignant ce qu'il enseigne et son nombre de séances"
+              >
+                <Users className="w-3.5 h-3.5 text-teal-600" />
+                <span>Enseignants & Charges ({teachers.length})</span>
+              </button>
+            )}
 
             <button
               type="button"

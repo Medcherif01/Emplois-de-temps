@@ -136,6 +136,8 @@ interface LoadsAndManagementWorkspaceProps {
   onExportExcelLoadTeachers?: () => void;
   onExportExcelLoadClasses?: () => void;
   onExportExcelLoadSubjects?: () => void;
+  onOpenClassManager?: () => void;
+  onOpenTeachersDirectory?: () => void;
 }
 
 const CATEGORIES: SchoolCategory[] = [
@@ -189,6 +191,8 @@ export const LoadsAndManagementWorkspace: React.FC<
   onExportExcelLoadTeachers,
   onExportExcelLoadClasses,
   onExportExcelLoadSubjects,
+  onOpenClassManager,
+  onOpenTeachersDirectory,
 }) => {
   const [subTab, setSubTab] = useState<
     | 'load_teachers'
@@ -555,15 +559,41 @@ export const LoadsAndManagementWorkspace: React.FC<
           </button>
         </div>
 
-        <div className="relative min-w-[230px]">
-          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Filtrer prof, classe, matière..."
-            className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-sky-500"
-          />
+        <div className="flex items-center gap-2">
+          {onOpenClassManager && (
+            <button
+              type="button"
+              onClick={onOpenClassManager}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black bg-indigo-600 hover:bg-indigo-700 text-white shadow-2xs transition-all cursor-pointer whitespace-nowrap"
+              title="Ajouter ou supprimer une classe, configurer ses matières et enseignants"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>+ Gérer Classes</span>
+            </button>
+          )}
+
+          {onOpenTeachersDirectory && (
+            <button
+              type="button"
+              onClick={onOpenTeachersDirectory}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-teal-50 hover:bg-teal-100 text-teal-800 border border-teal-300 shadow-2xs transition-all cursor-pointer whitespace-nowrap"
+              title="Afficher pour chaque enseignant ce qu'il enseigne et son nombre de séances"
+            >
+              <Users className="w-3.5 h-3.5 text-teal-600" />
+              <span>Ce qu'ils enseignent</span>
+            </button>
+          )}
+
+          <div className="relative min-w-[210px]">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Filtrer prof, classe, matière..."
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:border-sky-500"
+            />
+          </div>
         </div>
       </div>
 

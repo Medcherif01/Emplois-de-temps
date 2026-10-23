@@ -90,6 +90,9 @@ import {
   AscModalType,
   AscTimetablesRibbonAndDialogs,
 } from './components/AscTimetablesRibbonAndDialogs';
+import { ClassAddEditDeleteModal } from './components/ClassAddEditDeleteModal';
+import { TeachersWorkloadDirectoryModal } from './components/TeachersWorkloadDirectoryModal';
+import { GlobalSearchOmnibar } from './components/GlobalSearchOmnibar';
 import {
   CATEGORY_SHORT_LABELS,
   classMatchesCategory,
@@ -348,6 +351,8 @@ export default function App() {
 
   // aSc TimeTables Dedicated Modal State (Constraints, Timings, Breaks, Assistant, Lesson Contract, All Settings)
   const [activeAscModal, setActiveAscModal] = useState<AscModalType>(null);
+  const [showClassManagerModal, setShowClassManagerModal] = useState(false);
+  const [showTeachersDirectoryModal, setShowTeachersDirectoryModal] = useState(false);
 
   // Cell Editor Modal
   const [editingCell, setEditingCell] = useState<{
@@ -1392,6 +1397,81 @@ export default function App() {
     appendAuditLog(
       `Modification Load (${cls.name})`,
       `${subjectName} -> ${updatedCount}p/sem (${delta > 0 ? `+${delta}` : delta})`
+    );
+  };
+
+  // Handler: Add a new class to the school schedule
+  const handleAddNewClass = async (
+    newCls: SchoolClass,
+    initialSubjects?: Array<{
+      subject: string;
+      teacher: string;
+      periods: number;
+      assistantTeacher?: string;
+    }>
+  ) => {
+    const populatedClass = { ...newCls };
+    if (initialSubjects && initialSubjects.length > 0) {
+      const slots: Record<string, LessonSlot> = {};
+      const maxP =
+        newCls.section === 'KG' ? 6 : newCls.section === 'KG3_GS' ? 7 : 8;
+      for (const item of initialSubjects) {
+        let added = 0;
+        for (const day of DAYS_OF_WEEK) {
+          for (let p = 1; p <= maxP; p++) {
+            if (added >= item.periods) break;
+            const k = `${day}_${p}`;
+            if (!slots[k]) {
+              slots[k] = {
+                subject: item.subject,
+                teacher: item.teacher,
+                assistantTeacher: item.assistantTeacher || newCls.defaultAssistant,
+                room: newCls.room,
+              };
+              added++;
+            }
+          }
+        }
+      }
+      populatedClass.slots = slots;
+    }
+
+    const nextClasses = [...classes, populatedClass];
+    recordHistoryAndSetClasses(nextClasses);
+    setSelectedClassId(populatedClass.id);
+    appendAuditLog(
+      `Création de classe (${populatedClass.name})`,
+      `Nouvelle classe créée dans ${populatedClass.category || populatedClass.section} avec ${Object.keys(populatedClass.slots).length} séances.`
+    );
+    await triggerRealtimeNotification(
+      `Nouvelle classe créée : ${populatedClass.name}`,
+      `La classe ${populatedClass.name} a été ajoutée à l'établissement.`,
+      'schedule_updated',
+      'all'
+    );
+  };
+
+  // Handler: Delete a class from the school schedule
+  const handleDeleteClass = async (classId: string) => {
+    const clsToDelete = classes.find((c) => c.id === classId);
+    if (!clsToDelete) return;
+
+    const nextClasses = classes.filter((c) => c.id !== classId);
+    recordHistoryAndSetClasses(nextClasses);
+
+    if (selectedClassId === classId && nextClasses.length > 0) {
+      setSelectedClassId(nextClasses[0].id);
+    }
+
+    appendAuditLog(
+      `Suppression de classe (${clsToDelete.name})`,
+      `Classe supprimée. Ses séances ont été retirées (annulable via Précédent).`
+    );
+    await triggerRealtimeNotification(
+      `Classe supprimée : ${clsToDelete.name}`,
+      `La classe ${clsToDelete.name} a été supprimée de l'établissement.`,
+      'schedule_updated',
+      'all'
     );
   };
 
@@ -2988,11 +3068,52 @@ export default function App() {
           ))}
         </nav>
 
-        {/* Zone 3: 1 primary action */}
-        <div className="flex items-center gap-3 shrink-0">
+        {/* Barre de Recherche Principale (Classes & Enseignants) */}
+        <div className="flex-1 max-w-xs md:max-w-sm lg:max-w-md mx-2">
+          <GlobalSearchOmnibar
+            classes={classes}
+            teachers={teachers}
+            onSelectClass={(classId) => {
+              setSelectedClassId(classId);
+              setActiveTab('editor');
+              setGridViewMode('class');
+            }}
+            onSelectTeacher={(teacherId) => {
+              setSelectedTeacherId(teacherId);
+              setActiveTab('editor');
+              setGridViewMode('teacher');
+            }}
+            onOpenClassManager={() => setShowClassManagerModal(true)}
+            onOpenTeachersDirectory={() => setShowTeachersDirectoryModal(true)}
+            darkMode={darkMode}
+          />
+        </div>
+
+        {/* Zone 3: Quick Action Buttons & Print */}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setShowClassManagerModal(true)}
+            className="px-3 py-1.5 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 shadow-2xs cursor-pointer"
+            title="Ajouter ou supprimer une classe, configurer ses matières et enseignants"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">+ Gérer Classe</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowTeachersDirectoryModal(true)}
+            className="px-3 py-1.5 text-xs font-bold text-teal-800 dark:text-teal-200 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 border border-teal-300 dark:border-teal-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 shadow-2xs cursor-pointer"
+            title="Voir pour chaque enseignant ce qu'il enseigne et son nombre de séances"
+          >
+            <Users className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
+            <span className="hidden sm:inline">Enseignants</span>
+          </button>
+
           <button
             onClick={() => window.print()}
-            className="px-4 py-2 text-xs font-semibold text-white bg-sky-700 rounded-lg hover:bg-sky-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-sky-700 rounded-lg hover:bg-sky-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
           >
             <Printer className="w-3.5 h-3.5" />
             <span>{tStrings.printPdfBtn}</span>
@@ -3251,6 +3372,8 @@ export default function App() {
       <AscTimetablesRibbonAndDialogs
         activeModal={activeAscModal}
         onOpenModal={setActiveAscModal}
+        onOpenClassManager={() => setShowClassManagerModal(true)}
+        onOpenTeachersDirectory={() => setShowTeachersDirectoryModal(true)}
         classes={classes}
         teachers={teachers}
         subjectConfigs={subjectConfigs}
@@ -3511,6 +3634,8 @@ export default function App() {
                 onExportExcelLoadTeachers={handleExportExcelLoadTeachers}
                 onExportExcelLoadClasses={handleExportExcelLoadClasses}
                 onExportExcelLoadSubjects={handleExportExcelLoadTeachers}
+                onOpenClassManager={() => setShowClassManagerModal(true)}
+                onOpenTeachersDirectory={() => setShowTeachersDirectoryModal(true)}
               />
             )}
 
@@ -4034,6 +4159,8 @@ export default function App() {
                 onPrintLoadSubjects={() =>
                   handlePrintLoadReport('subjects_load')
                 }
+                onOpenClassManager={() => setShowClassManagerModal(true)}
+                onOpenTeachersDirectory={() => setShowTeachersDirectoryModal(true)}
               />
             )}
 
@@ -5654,6 +5781,40 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* =====================================================================
+          MODAL: GESTIONNAIRE DE CLASSE (AJOUTER, CONFIGURER MATIERES & SUPPRIMER)
+         ===================================================================== */}
+      <ClassAddEditDeleteModal
+        isOpen={showClassManagerModal}
+        onClose={() => setShowClassManagerModal(false)}
+        classes={classes}
+        teachers={teachers}
+        initialClassId={selectedClassId}
+        onSaveClass={(updated) => saveClassToStore(updated)}
+        onAddClass={handleAddNewClass}
+        onDeleteClass={handleDeleteClass}
+        darkMode={darkMode}
+      />
+
+      {/* =====================================================================
+          MODAL: RÉPERTOIRE ENSEIGNANTS (CE QU'ILS ENSEIGNENT & NOMBRE DE SÉANCES)
+         ===================================================================== */}
+      <TeachersWorkloadDirectoryModal
+        isOpen={showTeachersDirectoryModal}
+        onClose={() => setShowTeachersDirectoryModal(false)}
+        teachers={teachers}
+        classes={classes}
+        selectedCategory={selectedCategory}
+        onSelectCategory={setSelectedCategory}
+        onSelectTeacherForTimetable={(teacherId) => {
+          setSelectedTeacherId(teacherId);
+          setActiveTab('editor');
+          setGridViewMode('teacher');
+        }}
+        onPrintTeacherReport={() => handlePrintLoadReport('teachers_load')}
+        darkMode={darkMode}
+      />
 
       {/* QUIET FOOTER */}
       <footer
