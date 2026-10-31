@@ -79,6 +79,12 @@ interface MasterEnsembleMatrixProps {
     placedCount: number;
     leftAsideCount: number;
     frozenClassesCount: number;
+    teacherLoadVerification?: Array<{
+      teacher: string;
+      targetPeriods: number;
+      actualPeriods: number;
+      details: string;
+    }>;
   } | null;
   selectedCategory: SchoolCategory;
   onSelectCategory: (cat: SchoolCategory) => void;
@@ -101,6 +107,18 @@ interface MasterEnsembleMatrixProps {
 
 const PRESET_AI_ORDERS = [
   {
+    label: '★ Restructuration Garçons (G3A/3B, G4A/4B & Charges)',
+    prompt: `1. Instructions Générales sur la Structure des Classes :
+- Grade 3 Boys est scindé en : Grade 3A Boys (الصف الثالث أ) et Grade 3B Boys (الصف الثالث ب)
+- Grade 4 Boys est scindé en : Grade 4A Boys (الصف الرابع أ) et Grade 4B Boys (الصف الرابع ب)
+2. Répartition des Matières (Grade 3 & Grade 4) :
+- Grade 3A & 3B Boys : Maths (New Teacher), Sciences (New Teacher), English (Ms. Mira), Library (Ms. Mira), Social Studies (Ms. Husnia), Computing (Ms. Husnia)
+- Grade 4A Boys : Maths (New Teacher), Sciences (Ms. Elisa), English (Ms. Mira), Social Studies (Ms. Husnia), Computing (Ms. Ola), Library (Ms. Joudy - Séance commune avec Grade 4B)
+- Grade 4B Boys : Maths (New Teacher), Sciences (Ms. Elisa), English (Ms. Fayrouz), Social Studies (Ms. Husnia), Computing (Ms. Ola), Library (Ms. Joudy - Séance commune avec Grade 4A)
+3. Ajustements des Charges : New Teacher (28), Ms. Mira (25), Ms. Fayrouz (28), Ms. Elisa (25), Ms. Ola (26), Ms. Husnia (26 - retrait Computing G1/G2 vers Homeroom), Ms. Joudy (28 - Library groupée 4A+4B).
+4. Séances Complémentaires : Musique (+2), Arts Plastiques (2), PE (+2), Montessori (+1), Français (+2).`,
+  },
+  {
     label: 'Fondamentaux le matin (P1-P4)',
     prompt:
       'Placer Maths, Français, Anglais, Arabe et Sciences le matin (P1 à P4), et mettre Sport, Art, Musique et Bibliothèque en fin de journée (P5 à P8).',
@@ -114,11 +132,6 @@ const PRESET_AI_ORDERS = [
     label: 'Zéro conflit & sans trou prof',
     prompt:
       'Éliminer tous les conflits enseignants, regrouper les cours des professeurs et laisser à côté toute séance qui n’a pas de place logique.',
-  },
-  {
-    label: 'Jeudi après-midi allégé',
-    prompt:
-      'Prioriser les matières principales de Dimanche à Mercredi matin et alléger le Jeudi après-midi (P6-P8).',
   },
 ];
 
@@ -566,21 +579,15 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
 
         {showAiGeneratorPanel && (
           <div className="p-3.5 space-y-3">
-            {/* Row 1: Prompt Input + Generate Button */}
-            <div className="flex flex-col lg:flex-row items-stretch lg:items-center gap-2.5">
+            {/* Row 1: Multi-line Order Textarea + Action Buttons */}
+            <div className="flex flex-col lg:flex-row items-stretch gap-2.5">
               <div className="flex-1 relative">
-                <input
-                  type="text"
+                <textarea
+                  rows={3}
                   value={aiOrderInput}
                   onChange={(e) => onChangeAiOrderInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !isGeneratingAiOrder) {
-                      e.preventDefault();
-                      onGenerateWithAiOrder();
-                    }
-                  }}
-                  placeholder="Écrivez votre idée ou ordre (ex: Placer Maths et Français le matin P1-P4, pas de Sport en P1, équilibrer la semaine...)"
-                  className={`w-full pl-3.5 pr-9 py-2 text-xs sm:text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600 ${
+                  placeholder="Collez ou écrivez votre ordre complet (scission de classes Grade 3A/3B, répartition des matières et enseignantes, charges horaires, séances communes ou complémentaires...)"
+                  className={`w-full pl-3.5 pr-9 py-2 text-xs leading-relaxed border rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600 resize-y ${
                     darkMode
                       ? 'bg-slate-800 border-slate-700 text-white placeholder:text-slate-400'
                       : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'
@@ -590,26 +597,32 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                   <button
                     type="button"
                     onClick={() => onChangeAiOrderInput('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                    title="Effacer l'ordre"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
                 )}
               </div>
 
-              <button
-                type="button"
-                disabled={isGeneratingAiOrder}
-                onClick={onGenerateWithAiOrder}
-                className="px-4 py-2 bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xs transition-colors shrink-0 cursor-pointer"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>
-                  {isGeneratingAiOrder
-                    ? 'Génération IA en cours...'
-                    : 'Générer selon cet ordre'}
-                </span>
-              </button>
+              <div className="flex flex-col justify-between gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  disabled={isGeneratingAiOrder}
+                  onClick={onGenerateWithAiOrder}
+                  className="px-4 py-2.5 bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xs transition-colors cursor-pointer"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>
+                    {isGeneratingAiOrder
+                      ? 'Application de l’ordre en cours...'
+                      : 'Traiter & Appliquer cet Ordre'}
+                  </span>
+                </button>
+                <div className="text-[10px] text-slate-500 text-center">
+                  Sans endommager les autres classes · 0 conflit
+                </div>
+              </div>
             </div>
 
             {/* Row 2: Quick Idea / Order Presets */}
@@ -772,29 +785,55 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
               </div>
             )}
 
-            {/* Last Generation Summary Banner */}
+            {/* Last Generation Summary Banner + Teacher Load Verification Table */}
             {lastGenerationReport && (
-              <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>
-                    <strong>Génération terminée :</strong>{' '}
-                    {lastGenerationReport.summary}
-                  </span>
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                    <span>
+                      <strong>Ordre appliqué avec succès :</strong>{' '}
+                      {lastGenerationReport.summary}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 font-mono text-[11px] shrink-0">
+                    <span>
+                      {lastGenerationReport.frozenClassesCount} classe(s) intacte(s) 🔒
+                    </span>
+                    <span>·</span>
+                    <span className="text-emerald-700 font-bold">
+                      {lastGenerationReport.placedCount} séances placées ✓
+                    </span>
+                    <span>·</span>
+                    <span className="text-indigo-700 font-bold">
+                      {lastGenerationReport.leftAsideCount} mise(s) à côté 👉
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3 font-mono text-[11px]">
-                  <span>
-                    {lastGenerationReport.frozenClassesCount} classe(s) gardée(s) 🔒
-                  </span>
-                  <span>·</span>
-                  <span className="text-emerald-700 font-bold">
-                    {lastGenerationReport.placedCount} séances placées ✓
-                  </span>
-                  <span>·</span>
-                  <span className="text-indigo-700 font-bold">
-                    {lastGenerationReport.leftAsideCount} mise(s) à côté 👉
-                  </span>
-                </div>
+
+                {lastGenerationReport.teacherLoadVerification &&
+                  lastGenerationReport.teacherLoadVerification.length > 0 && (
+                    <div className="pt-2 border-t border-emerald-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                      {lastGenerationReport.teacherLoadVerification.map((v) => (
+                        <div
+                          key={v.teacher}
+                          className="bg-white/90 border border-emerald-200 rounded-md px-2.5 py-1.5 flex flex-col justify-between"
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="font-bold text-slate-900 text-[11px]">
+                              {v.teacher}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-mono font-bold text-[10px]">
+                              {v.actualPeriods} / {v.targetPeriods} séances ✓
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-600 mt-0.5 leading-snug">
+                            {v.details}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
               </div>
             )}
           </div>

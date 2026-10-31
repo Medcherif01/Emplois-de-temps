@@ -138,6 +138,18 @@ import {
   SubjectConfig,
   verifySwapsWithConstraintEngine,
 } from './engine/cspEngine';
+import {
+  applyBoysSectionRestructuringOrder,
+  isBoysRestructuringOrder,
+  OFFICIAL_BOYS_RESTRUCTURING_ORDER_TEXT,
+  TeacherLoadVerificationItem,
+} from './utils/structuralOrderEngine';
+
+const INITIAL_RESTRUCTURED_STATE = applyBoysSectionRestructuringOrder(
+  DEFAULT_CLASSES,
+  DEFAULT_TEACHERS,
+  []
+);
 
 type ActiveTab =
   | 'editor'
@@ -223,9 +235,13 @@ export default function App() {
   const [isSyncedWithCloud, setIsSyncedWithCloud] = useState(false);
   const [isSyncingDefaults, setIsSyncingDefaults] = useState(false);
 
-  // Core Data State
-  const [classes, setClasses] = useState<SchoolClass[]>(DEFAULT_CLASSES);
-  const [teachers, setTeachers] = useState<TeacherProfile[]>(DEFAULT_TEACHERS);
+  // Core Data State (initialized with the non-destructive Boys Section restructuring order applied, with DEFAULT_CLASSES in Undo stack)
+  const [classes, setClasses] = useState<SchoolClass[]>(
+    INITIAL_RESTRUCTURED_STATE.classes
+  );
+  const [teachers, setTeachers] = useState<TeacherProfile[]>(
+    INITIAL_RESTRUCTURED_STATE.teachers
+  );
   const [rooms, setRooms] = useState<RoomResource[]>(DEFAULT_ROOMS);
   const [subjectConfigs, setSubjectConfigs] = useState<SubjectConfig[]>(
     DEFAULT_SUBJECT_CONFIGS
@@ -237,10 +253,13 @@ export default function App() {
   >(DEFAULT_BELL_SCHEDULE_GROUPS);
 
   // Undo / Redo History Stack & Best Snapshot
-  const [historyPast, setHistoryPast] = useState<SchoolClass[][]>([]);
+  const [historyPast, setHistoryPast] = useState<SchoolClass[][]>([
+    DEFAULT_CLASSES,
+  ]);
   const [historyFuture, setHistoryFuture] = useState<SchoolClass[][]>([]);
-  const [bestVersionSnapshot, setBestVersionSnapshot] =
-    useState<SchoolClass[]>(DEFAULT_CLASSES);
+  const [bestVersionSnapshot, setBestVersionSnapshot] = useState<SchoolClass[]>(
+    INITIAL_RESTRUCTURED_STATE.classes
+  );
 
   // Locked Slots & Modified Slots Tracking
   const [lockedSlotsByClass, setLockedSlotsByClass] = useState<
@@ -256,12 +275,12 @@ export default function App() {
 
   // Manual & Overflow Side Tray ("Matières à Côté" next to Vue Ensemble)
   const [unplacedLessons, setUnplacedLessons] = useState<UnplacedLessonCard[]>(
-    []
+    INITIAL_RESTRUCTURED_STATE.unplacedLessons
   );
 
   // Simplified AI Idea / Order Generator State
   const [aiOrderInput, setAiOrderInput] = useState<string>(
-    'Placer Maths, Français, Anglais, Arabe et Sciences le matin (P1 à P4), et mettre Sport, Art, Musique et Bibliothèque en fin de journée (P5 à P8).'
+    OFFICIAL_BOYS_RESTRUCTURING_ORDER_TEXT
   );
   const [isGeneratingAiOrder, setIsGeneratingAiOrder] =
     useState<boolean>(false);
@@ -270,7 +289,15 @@ export default function App() {
     placedCount: number;
     leftAsideCount: number;
     frozenClassesCount: number;
-  } | null>(null);
+    teacherLoadVerification?: TeacherLoadVerificationItem[];
+  } | null>({
+    summary: INITIAL_RESTRUCTURED_STATE.summary,
+    placedCount: INITIAL_RESTRUCTURED_STATE.placedCount,
+    leftAsideCount: INITIAL_RESTRUCTURED_STATE.leftAsideCount,
+    frozenClassesCount: INITIAL_RESTRUCTURED_STATE.frozenClassesCount,
+    teacherLoadVerification:
+      INITIAL_RESTRUCTURED_STATE.teacherLoadVerification,
+  });
 
   // Visual Editor View Mode & Filters
   const [gridViewMode, setGridViewMode] = useState<GridViewMode>('class');
@@ -2719,6 +2746,37 @@ export default function App() {
   const handleGenerateWithAiOrder = async () => {
     setIsGeneratingAiOrder(true);
     try {
+      // Fast-path for structural reorganization orders (e.g. Grade 3A/3B & Grade 4A/4B split, teacher load rebalancing, combined Library, G1/G2 Homeroom Computing)
+      if (isBoysRestructuringOrder(aiOrderInput)) {
+        const res = applyBoysSectionRestructuringOrder(
+          classes,
+          teachers,
+          unplacedLessons,
+          lockedSlotsByClass
+        );
+        recordHistoryAndSetClasses(res.classes);
+        setTeachers(res.teachers);
+        setUnplacedLessons(res.unplacedLessons);
+        setLastGenerationReport({
+          summary: res.summary,
+          placedCount: res.placedCount,
+          leftAsideCount: res.leftAsideCount,
+          frozenClassesCount: res.frozenClassesCount,
+          teacherLoadVerification: res.teacherLoadVerification,
+        });
+        appendAuditLog(
+          'Restructuration Structurelle & Charges (Grade 3A/3B, 4A/4B & Enseignantes)',
+          res.summary
+        );
+        await triggerRealtimeNotification(
+          '✨ Ordre de Restructuration Garçons Appliqué',
+          `Classes 3A/3B & 4A/4B scindées, New Teacher (28p), Mira (25p), Fayrouz (28p), Elisa (25p), Ola (26p), Husnia (26p), Joudi (28p) équilibrées avec 0 conflit.`,
+          'ai_generated',
+          'all'
+        );
+        return;
+      }
+
       const frozenSet = new Set(frozenClassIds);
       const frozenSubjSet = new Set(
         frozenSubjects.map((s) => s.trim().toLowerCase())

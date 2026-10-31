@@ -3575,9 +3575,20 @@ export function buildTeacherTimetable(
           };
         } else {
           // If it's an intentional joint class, merge class names cleanly without counting twice in display
-          const isJoint = slot.jointWithClasses?.some(
-            (jc) => jc.toLowerCase() === slots[key].teacher.toLowerCase()
-          );
+          const existingTeacherLabel = slots[key].teacher.toLowerCase();
+          const isJoint =
+            Boolean(slot.jointWithClasses && slot.jointWithClasses.length > 0) ||
+            Boolean(
+              slots[key].jointWithClasses &&
+                slots[key].jointWithClasses!.some(
+                  (jc) => jc.toLowerCase() === cls.name.toLowerCase()
+                )
+            ) ||
+            Boolean(
+              slot.jointWithClasses?.some((jc) =>
+                existingTeacherLabel.includes(jc.toLowerCase())
+              )
+            );
           if (isJoint) {
             totalPeriods = Math.max(1, totalPeriods - 1); // Joint class is 1 period of teaching load
           } else {
