@@ -127,3 +127,18 @@ export interface NotificationEntry {
   createdAt?: unknown;
   timestampMs?: number;
 }
+
+export interface UnplacedLessonCard {
+  id: string;
+  classId: string;
+  className: string;
+  subject: string;
+  teacher: string;
+  assistantTeacher?: string;
+  subSubject?: string;
+  subTeacher?: string;
+  room?: string;
+  groupName?: string;
+  reason?: string;
+}
+

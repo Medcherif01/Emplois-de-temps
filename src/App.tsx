@@ -79,6 +79,7 @@ import {
   SchoolClass,
   SectionType,
   TeacherProfile,
+  UnplacedLessonCard,
 } from './types/timetable';
 import {
   generateStandaloneLandscapeHtml,
@@ -248,6 +249,28 @@ export default function App() {
   const [modifiedSlotsByClass, setModifiedSlotsByClass] = useState<
     Record<string, string[]>
   >({});
+
+  // Frozen Classes (Keep subject positions for selected classes during generation) & Frozen Subjects
+  const [frozenClassIds, setFrozenClassIds] = useState<string[]>([]);
+  const [frozenSubjects, setFrozenSubjects] = useState<string[]>([]);
+
+  // Manual & Overflow Side Tray ("Matières à Côté" next to Vue Ensemble)
+  const [unplacedLessons, setUnplacedLessons] = useState<UnplacedLessonCard[]>(
+    []
+  );
+
+  // Simplified AI Idea / Order Generator State
+  const [aiOrderInput, setAiOrderInput] = useState<string>(
+    'Placer Maths, Français, Anglais, Arabe et Sciences le matin (P1 à P4), et mettre Sport, Art, Musique et Bibliothèque en fin de journée (P5 à P8).'
+  );
+  const [isGeneratingAiOrder, setIsGeneratingAiOrder] =
+    useState<boolean>(false);
+  const [lastGenerationReport, setLastGenerationReport] = useState<{
+    summary: string;
+    placedCount: number;
+    leftAsideCount: number;
+    frozenClassesCount: number;
+  } | null>(null);
 
   // Visual Editor View Mode & Filters
   const [gridViewMode, setGridViewMode] = useState<GridViewMode>('class');
@@ -2468,6 +2491,597 @@ export default function App() {
     );
   };
 
+  // =====================================================================
+  // HANDLERS: CLASSES FIGÉES, BAC MATIÈRES À CÔTÉ & GÉNÉRATION IA PAR ORDRE
+  // =====================================================================
+  const handleToggleFreezeClass = (classId: string) => {
+    setFrozenClassIds((prev) =>
+      prev.includes(classId)
+        ? prev.filter((id) => id !== classId)
+        : [...prev, classId]
+    );
+  };
+
+  const handleToggleFreezeSubject = (subject: string) => {
+    setFrozenSubjects((prev) =>
+      prev.includes(subject)
+        ? prev.filter((s) => s !== subject)
+        : [...prev, subject]
+    );
+  };
+
+  const handleAddManualUnplacedLesson = (payload: {
+    classId: string;
+    subject: string;
+    teacher: string;
+    periodsCount: number;
+  }) => {
+    const cls = classes.find((c) => c.id === payload.classId);
+    if (!cls || !payload.subject.trim()) return;
+
+    const createdCards: UnplacedLessonCard[] = Array.from(
+      { length: Math.max(1, payload.periodsCount) },
+      (_, idx) => ({
+        id: `tray_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
+        classId: cls.id,
+        className: cls.name,
+        subject: payload.subject.trim(),
+        teacher: payload.teacher.trim() || 'Enseignant',
+        room: cls.room,
+        reason: 'Ajoutée manuellement à côté pour placement',
+      })
+    );
+
+    setUnplacedLessons((prev) => [...createdCards, ...prev]);
+    appendAuditLog(
+      `Matière ajoutée à côté (${cls.name})`,
+      `${payload.periodsCount} séance(s) de ${payload.subject} (${payload.teacher}) ajoutée(s) dans la réserve à côté.`
+    );
+  };
+
+  const handleMoveSlotToSideTray = async (classId: string, slotKey: string) => {
+    const cls = classes.find((c) => c.id === classId);
+    if (!cls) return;
+    const slot = cls.slots[slotKey];
+    if (!slot) return;
+
+    const nextSlots = { ...cls.slots };
+    delete nextSlots[slotKey];
+
+    const newCard: UnplacedLessonCard = {
+      id: `tray_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      classId: cls.id,
+      className: cls.name,
+      subject: slot.subject,
+      teacher: slot.teacher,
+      assistantTeacher: slot.assistantTeacher,
+      subSubject: slot.subSubject,
+      subTeacher: slot.subTeacher,
+      room: slot.room || cls.room,
+      groupName: slot.groupName,
+      reason: `Retirée de ${slotKey.replace('_', ' P')} (mise à côté manuellement)`,
+    };
+
+    setUnplacedLessons((prev) => [newCard, ...prev]);
+    await saveClassToStore({ ...cls, slots: nextSlots }, [slotKey]);
+    appendAuditLog(
+      `Matière mise à côté (${cls.name})`,
+      `${slot.subject} (${slot.teacher}) retirée de ${slotKey.replace('_', ' P')} et gardée à côté.`
+    );
+  };
+
+  const handlePlaceCardFromSideTray = async (
+    cardId: string,
+    targetClassId: string,
+    targetSlotKey: string,
+    allowSwapToTray = true
+  ) => {
+    const card = unplacedLessons.find((c) => c.id === cardId);
+    const cls = classes.find((c) => c.id === targetClassId);
+    if (!card || !cls) return;
+
+    const nextSlots = { ...cls.slots };
+    const existingSlot = nextSlots[targetSlotKey];
+
+    let swappedCard: UnplacedLessonCard | null = null;
+    if (existingSlot && allowSwapToTray) {
+      swappedCard = {
+        id: `tray_swap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        classId: cls.id,
+        className: cls.name,
+        subject: existingSlot.subject,
+        teacher: existingSlot.teacher,
+        assistantTeacher: existingSlot.assistantTeacher,
+        subSubject: existingSlot.subSubject,
+        subTeacher: existingSlot.subTeacher,
+        room: existingSlot.room || cls.room,
+        groupName: existingSlot.groupName,
+        reason: `Remplacée sur ${targetSlotKey.replace('_', ' P')} par ${card.subject}`,
+      };
+    }
+
+    nextSlots[targetSlotKey] = {
+      subject: card.subject,
+      teacher: card.teacher,
+      assistantTeacher: card.assistantTeacher || cls.defaultAssistant,
+      subSubject: card.subSubject,
+      subTeacher: card.subTeacher,
+      room: card.room || cls.room,
+      groupName: card.groupName,
+    };
+
+    setUnplacedLessons((prev) => {
+      const remaining = prev.filter((c) => c.id !== cardId);
+      return swappedCard ? [swappedCard, ...remaining] : remaining;
+    });
+
+    await saveClassToStore({ ...cls, slots: nextSlots }, [targetSlotKey]);
+    appendAuditLog(
+      `Placement manuel depuis la réserve (${cls.name})`,
+      `${card.subject} (${card.teacher}) placée sur ${targetSlotKey.replace('_', ' P')}.`
+    );
+  };
+
+  const handleRemoveUnplacedCard = (cardId: string) => {
+    setUnplacedLessons((prev) => prev.filter((c) => c.id !== cardId));
+  };
+
+  const handleClearSideTray = () => {
+    setUnplacedLessons([]);
+  };
+
+  const handleAutoPlaceSideTrayCards = () => {
+    if (unplacedLessons.length === 0) return;
+
+    const nextClasses = classes.map((c) => ({
+      ...c,
+      slots: { ...c.slots },
+    }));
+
+    const stillUnplaced: UnplacedLessonCard[] = [];
+    let placedCount = 0;
+
+    for (const card of unplacedLessons) {
+      const targetCls = nextClasses.find((c) => c.id === card.classId);
+      if (!targetCls) {
+        stillUnplaced.push(card);
+        continue;
+      }
+
+      const maxP =
+        targetCls.section === 'KG'
+          ? 6
+          : targetCls.section === 'KG3_GS'
+          ? 7
+          : 8;
+      const teacherNorm = card.teacher.trim().toLowerCase();
+      const teacherProfile = teachers.find(
+        (t) => t.name.trim().toLowerCase() === teacherNorm
+      );
+      const unavailSet = new Set(teacherProfile?.unavailableSlots || []);
+      const classUnavailSet = new Set(targetCls.unavailableSlots || []);
+
+      let foundSlotKey: string | null = null;
+      for (const day of DAYS_OF_WEEK) {
+        if (foundSlotKey) break;
+        for (let p = 1; p <= maxP; p++) {
+          const slotKey = `${day}_${p}`;
+          if (targetCls.slots[slotKey]) continue;
+          if (unavailSet.has(slotKey) || classUnavailSet.has(slotKey)) continue;
+
+          const busyElsewhere = nextClasses.some((other) => {
+            if (other.id === targetCls.id) return false;
+            const s = other.slots[slotKey];
+            return (
+              s &&
+              (s.teacher.trim().toLowerCase() === teacherNorm ||
+                s.subTeacher?.trim().toLowerCase() === teacherNorm)
+            );
+          });
+
+          if (!busyElsewhere) {
+            foundSlotKey = slotKey;
+            break;
+          }
+        }
+      }
+
+      if (foundSlotKey) {
+        targetCls.slots[foundSlotKey] = {
+          subject: card.subject,
+          teacher: card.teacher,
+          assistantTeacher: card.assistantTeacher || targetCls.defaultAssistant,
+          subSubject: card.subSubject,
+          subTeacher: card.subTeacher,
+          room: card.room || targetCls.room,
+          groupName: card.groupName,
+        };
+        placedCount++;
+      } else {
+        stillUnplaced.push({
+          ...card,
+          reason: `Aucun créneau libre sans conflit pour ${card.teacher}`,
+        });
+      }
+    }
+
+    if (placedCount > 0) {
+      recordHistoryAndSetClasses(nextClasses);
+    }
+    setUnplacedLessons(stillUnplaced);
+    appendAuditLog(
+      'Placement auto des matières à côté',
+      `${placedCount} séance(s) placée(s), ${stillUnplaced.length} laissée(s) à côté.`
+    );
+  };
+
+  // Génération IA selon l'idée / l'ordre demandé + Conservation des classes figées + Mise à côté si pas de place logique
+  const handleGenerateWithAiOrder = async () => {
+    setIsGeneratingAiOrder(true);
+    try {
+      const frozenSet = new Set(frozenClassIds);
+      const frozenSubjSet = new Set(
+        frozenSubjects.map((s) => s.trim().toLowerCase())
+      );
+
+      const frozenClassNames = classes
+        .filter((c) => frozenSet.has(c.id))
+        .map((c) => c.name);
+      const targetClassesList = classes.filter(
+        (c) => !frozenSet.has(c.id) && classMatchesCategory(c, selectedCategory)
+      );
+
+      const allSubjectsSet = new Set<string>();
+      classes.forEach((c) =>
+        Object.values(c.slots).forEach((s) => {
+          if (s.subject) allSubjectsSet.add(s.subject);
+        })
+      );
+
+      // 1. Ask Gemini AI to interpret the user's idea/order into structured directives
+      let aiDirectives: {
+        summary: string;
+        morningPrioritySubjects: string[];
+        afternoonSubjects: string[];
+        forbiddenPeriods: number[];
+        subjectSpecificRules: Array<{
+          subject: string;
+          preferredPeriods?: number[];
+          avoidPeriods?: number[];
+          preferredDays?: string[];
+        }>;
+        maxSameSubjectPerDay: number;
+      } = {
+        summary:
+          "Ordre appliqué : matières principales priorisées le matin (P1-P4), positions gardées pour les classes figées et séances sans place logique mises à côté.",
+        morningPrioritySubjects: [
+          'Maths',
+          'Mathematics',
+          'Français',
+          'English',
+          'Arabic',
+          'Physics',
+          'Chemistry',
+          'Biology',
+          'Science',
+        ],
+        afternoonSubjects: ['Art', 'P.E', 'Music', 'Library', 'Activity'],
+        forbiddenPeriods: [],
+        subjectSpecificRules: [],
+        maxSameSubjectPerDay: 2,
+      };
+
+      try {
+        const res = await fetch('/api/gemini/generate-by-order', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userOrder: aiOrderInput,
+            frozenClassNames,
+            frozenSubjects,
+            targetClassNames: targetClassesList.map((c) => c.name),
+            allSubjects: Array.from(allSubjectsSet),
+          }),
+        });
+        if (res.ok) {
+          const parsed = await res.json();
+          aiDirectives = { ...aiDirectives, ...parsed };
+        }
+      } catch (e) {
+        console.warn('Fallback to local directive parser:', e);
+      }
+
+      const morningSet = new Set(
+        (aiDirectives.morningPrioritySubjects || []).map((s) =>
+          s.trim().toLowerCase()
+        )
+      );
+      const afternoonSet = new Set(
+        (aiDirectives.afternoonSubjects || []).map((s) =>
+          s.trim().toLowerCase()
+        )
+      );
+      const globalForbiddenPeriods = new Set(
+        aiDirectives.forbiddenPeriods || []
+      );
+      const maxSamePerDay = Math.max(
+        1,
+        aiDirectives.maxSameSubjectPerDay || 2
+      );
+
+      // Also parse simple keywords from aiOrderInput directly for immediate responsiveness
+      const orderLower = aiOrderInput.toLowerCase();
+      const avoidJeudiLate =
+        orderLower.includes('jeudi') &&
+        (orderLower.includes('allég') ||
+          orderLower.includes('tôt') ||
+          orderLower.includes('p6') ||
+          orderLower.includes('p7'));
+      const avoidSportP1 =
+        (orderLower.includes('sport') || orderLower.includes('p.e')) &&
+        orderLower.includes('p1');
+
+      // 2. Build Global Busy Teacher Map from Frozen Classes & Locked/Frozen Slots
+      const teacherBusyAtSlot = new Set<string>(); // key: `${teacherLower}__${day}_${period}`
+      const markTeacherBusy = (slot: LessonSlot, slotKey: string) => {
+        if (slot.teacher) {
+          teacherBusyAtSlot.add(
+            `${slot.teacher.trim().toLowerCase()}__${slotKey}`
+          );
+        }
+        if (slot.subTeacher) {
+          teacherBusyAtSlot.add(
+            `${slot.subTeacher.trim().toLowerCase()}__${slotKey}`
+          );
+        }
+      };
+
+      const nextClasses: SchoolClass[] = classes.map((cls) => {
+        const isFrozenClass =
+          frozenSet.has(cls.id) || !classMatchesCategory(cls, selectedCategory);
+        if (isFrozenClass) {
+          for (const [k, s] of Object.entries(cls.slots)) {
+            markTeacherBusy(s, k);
+          }
+          return cls;
+        }
+
+        // For target classes, keep only locked slots, joint classes, or frozen subjects fixed
+        const lockedKeys = new Set(lockedSlotsByClass[cls.id] || []);
+        const fixedSlots: Record<string, LessonSlot> = {};
+        for (const [k, s] of Object.entries(cls.slots)) {
+          const isFixed =
+            lockedKeys.has(k) ||
+            frozenSubjSet.has(s.subject.trim().toLowerCase()) ||
+            Boolean(s.jointWithClasses && s.jointWithClasses.length > 0);
+          if (isFixed) {
+            fixedSlots[k] = s;
+            markTeacherBusy(s, k);
+          }
+        }
+        return {
+          ...cls,
+          slots: fixedSlots,
+        };
+      });
+
+      // Keep unplaced cards belonging to frozen/untouched classes untouched
+      const nextUnplaced: UnplacedLessonCard[] = unplacedLessons.filter(
+        (u) =>
+          frozenSet.has(u.classId) ||
+          !targetClassesList.some((tc) => tc.id === u.classId)
+      );
+
+      let totalPlacedCount = 0;
+      let totalLeftAsideCount = 0;
+
+      // 3. For each target class, collect movable lessons and place them logically according to AI order
+      for (const origCls of targetClassesList) {
+        const workingCls = nextClasses.find((c) => c.id === origCls.id)!;
+        const lockedKeys = new Set(lockedSlotsByClass[origCls.id] || []);
+
+        const movableLessons: LessonSlot[] = [];
+        for (const [k, s] of Object.entries(origCls.slots)) {
+          const isFixed =
+            lockedKeys.has(k) ||
+            frozenSubjSet.has(s.subject.trim().toLowerCase()) ||
+            Boolean(s.jointWithClasses && s.jointWithClasses.length > 0);
+          if (!isFixed) {
+            movableLessons.push(s);
+          }
+        }
+
+        // Also include any cards that were in the side tray for this class!
+        const trayCardsForCls = unplacedLessons.filter(
+          (u) => u.classId === origCls.id
+        );
+        for (const tc of trayCardsForCls) {
+          movableLessons.push({
+            subject: tc.subject,
+            teacher: tc.teacher,
+            assistantTeacher: tc.assistantTeacher,
+            subSubject: tc.subSubject,
+            subTeacher: tc.subTeacher,
+            room: tc.room || origCls.room,
+            groupName: tc.groupName,
+          });
+        }
+
+        // Sort movable lessons: morning priority & constrained teachers first
+        movableLessons.sort((a, b) => {
+          const aMorn = morningSet.has(a.subject.trim().toLowerCase()) ? 1 : 0;
+          const bMorn = morningSet.has(b.subject.trim().toLowerCase()) ? 1 : 0;
+          if (aMorn !== bMorn) return bMorn - aMorn;
+          return a.subject.localeCompare(b.subject);
+        });
+
+        const maxP =
+          origCls.section === 'KG'
+            ? 6
+            : origCls.section === 'KG3_GS'
+            ? 7
+            : 8;
+        const classUnavailSet = new Set(origCls.unavailableSlots || []);
+
+        for (const lesson of movableLessons) {
+          const subjLower = lesson.subject.trim().toLowerCase();
+          const teacherNorm = lesson.teacher.trim().toLowerCase();
+          const subTeacherNorm = lesson.subTeacher?.trim().toLowerCase() || '';
+
+          const teacherProfile = teachers.find(
+            (t) => t.name.trim().toLowerCase() === teacherNorm
+          );
+          const teacherUnavail = new Set(
+            teacherProfile?.unavailableSlots || []
+          );
+
+          const specRule = (aiDirectives.subjectSpecificRules || []).find(
+            (r) => r.subject.trim().toLowerCase() === subjLower
+          );
+
+          let bestKey: string | null = null;
+          let bestScore = -999999;
+
+          for (const day of DAYS_OF_WEEK) {
+            // Count how many times this subject is already placed on this day in workingCls
+            let sameSubjCountOnDay = 0;
+            for (let p = 1; p <= maxP; p++) {
+              const ex = workingCls.slots[`${day}_${p}`];
+              if (ex && ex.subject.trim().toLowerCase() === subjLower) {
+                sameSubjCountOnDay++;
+              }
+            }
+            if (sameSubjCountOnDay >= maxSamePerDay) {
+              continue;
+            }
+
+            for (let p = 1; p <= maxP; p++) {
+              const slotKey = `${day}_${p}`;
+              if (workingCls.slots[slotKey]) continue;
+              if (classUnavailSet.has(slotKey)) continue;
+              if (teacherUnavail.has(slotKey)) continue;
+              if (globalForbiddenPeriods.has(p)) continue;
+
+              // Check teacher collision across all classes
+              if (teacherBusyAtSlot.has(`${teacherNorm}__${slotKey}`)) continue;
+              if (
+                subTeacherNorm &&
+                teacherBusyAtSlot.has(`${subTeacherNorm}__${slotKey}`)
+              ) {
+                continue;
+              }
+
+              if (
+                specRule?.avoidPeriods &&
+                specRule.avoidPeriods.includes(p)
+              ) {
+                continue;
+              }
+              if (
+                avoidSportP1 &&
+                p === 1 &&
+                (subjLower.includes('p.e') || subjLower.includes('sport'))
+              ) {
+                continue;
+              }
+
+              // Logical slot is valid! Compute preference score based on AI order
+              let score = 100;
+
+              if (morningSet.has(subjLower)) {
+                score += p <= 4 ? 45 - p * 4 : -20;
+              } else if (afternoonSet.has(subjLower)) {
+                score += p >= 5 ? 35 : -10;
+              } else {
+                score += p <= 5 ? 15 : 5;
+              }
+
+              if (
+                specRule?.preferredPeriods &&
+                specRule.preferredPeriods.includes(p)
+              ) {
+                score += 50;
+              }
+              if (
+                specRule?.preferredDays &&
+                specRule.preferredDays.some(
+                  (d) => d.toLowerCase() === day.toLowerCase()
+                )
+              ) {
+                score += 35;
+              }
+
+              if (sameSubjCountOnDay > 0) {
+                score -= 35;
+              }
+
+              if (avoidJeudiLate && day === 'Jeudi' && p >= 6) {
+                score -= 40;
+              }
+
+              // Slight deterministic spread across days
+              const dayLoad = Array.from({ length: maxP }, (_, i) =>
+                Boolean(workingCls.slots[`${day}_${i + 1}`])
+              ).filter(Boolean).length;
+              score -= dayLoad * 2;
+
+              if (score > bestScore) {
+                bestScore = score;
+                bestKey = slotKey;
+              }
+            }
+          }
+
+          if (bestKey) {
+            workingCls.slots[bestKey] = lesson;
+            markTeacherBusy(lesson, bestKey);
+            totalPlacedCount++;
+          } else {
+            // NO LOGICAL CONFLICT-FREE SLOT -> Leave it in the Side Tray ("Matières à Côté")!
+            nextUnplaced.push({
+              id: `tray_gen_${Date.now()}_${totalLeftAsideCount}_${Math.random()
+                .toString(36)
+                .slice(2, 6)}`,
+              classId: origCls.id,
+              className: origCls.name,
+              subject: lesson.subject,
+              teacher: lesson.teacher,
+              assistantTeacher: lesson.assistantTeacher,
+              subSubject: lesson.subSubject,
+              subTeacher: lesson.subTeacher,
+              room: lesson.room || origCls.room,
+              groupName: lesson.groupName,
+              reason: `Pas de place logique sans conflit (${lesson.teacher} occupé/indisponible)`,
+            });
+            totalLeftAsideCount++;
+          }
+        }
+      }
+
+      recordHistoryAndSetClasses(nextClasses);
+      setUnplacedLessons(nextUnplaced);
+      setLastGenerationReport({
+        summary: aiDirectives.summary,
+        placedCount: totalPlacedCount,
+        leftAsideCount: totalLeftAsideCount,
+        frozenClassesCount: frozenClassIds.length,
+      });
+
+      appendAuditLog(
+        'Génération IA selon ordre demandé',
+        `${totalPlacedCount} séances placées, ${frozenClassIds.length} classe(s) gardée(s), ${totalLeftAsideCount} mise(s) à côté.`
+      );
+      await triggerRealtimeNotification(
+        'Génération IA terminée',
+        `${aiDirectives.summary} (${totalPlacedCount} placées · ${frozenClassIds.length} classes figées · ${totalLeftAsideCount} à côté).`,
+        'ai_generated',
+        'all'
+      );
+    } finally {
+      setIsGeneratingAiOrder(false);
+    }
+  };
+
   // Toggle Teacher Availability
   const handleToggleTeacherUnavailable = async (
     day: DayOfWeek,
@@ -3025,69 +3639,73 @@ export default function App() {
       }`}
     >
       {/* =====================================================================
-          TOP BAR CONTRACT: 3 clean zones separated by gap-8
+          SIMPLIFIED & PRACTICAL HEADER BAR
          ===================================================================== */}
       <header
-        className={`flex items-center justify-between gap-8 px-6 py-3.5 border-b no-print sticky top-0 z-30 ${
+        className={`flex flex-wrap items-center justify-between gap-4 px-5 py-2.5 border-b no-print sticky top-0 z-30 ${
           darkMode
             ? 'bg-slate-900 border-slate-800 text-white'
             : 'bg-white border-slate-200 text-slate-950'
         }`}
       >
-        {/* Zone 1: Single text element wordmark */}
-        <a
-          href="#top"
-          onClick={(e) => {
-            e.preventDefault();
-            setActiveTab('editor');
-          }}
-          className="text-lg font-bold tracking-tight whitespace-nowrap shrink-0"
-        >
-          ChronoScolaire AI
-        </a>
+        {/* Zone 1: Brand + Main Navigation Tabs */}
+        <div className="flex items-center gap-5">
+          <a
+            href="#top"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveTab('editor');
+              setEditorSubMode('ensemble');
+            }}
+            className="text-base font-extrabold tracking-tight whitespace-nowrap shrink-0"
+          >
+            ChronoScolaire AI
+          </a>
 
-        {/* Zone 2: 5 concise single-line navigation links */}
-        <nav className="hidden lg:flex items-center gap-6 text-sm font-medium">
-          {(
-            [
-              ['editor', tStrings.navEditor],
-              ['teachers', tStrings.navTeachers],
-              ['ai_csp', tStrings.navAiCsp],
-              ['resources', tStrings.navResources],
-              ['reports_export', tStrings.navReports],
-            ] as const
-          ).map(([tabKey, label]) => (
-            <button
-              key={tabKey}
-              onClick={() => setActiveTab(tabKey)}
-              className={`transition-colors whitespace-nowrap shrink-0 pb-0.5 ${
-                activeTab === tabKey
-                  ? darkMode
-                    ? 'text-white border-b-2 border-sky-400 font-semibold'
-                    : 'text-slate-950 border-b-2 border-slate-950 font-semibold'
-                  : darkMode
-                  ? 'text-slate-400 hover:text-white'
-                  : 'text-slate-600 hover:text-slate-950'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
+          <nav className="hidden xl:flex items-center gap-4 text-xs font-semibold">
+            {(
+              [
+                ['editor', tStrings.navEditor],
+                ['teachers', tStrings.navTeachers],
+                ['ai_csp', tStrings.navAiCsp],
+                ['resources', tStrings.navResources],
+                ['reports_export', tStrings.navReports],
+              ] as const
+            ).map(([tabKey, label]) => (
+              <button
+                key={tabKey}
+                onClick={() => setActiveTab(tabKey)}
+                className={`transition-colors whitespace-nowrap shrink-0 py-1 cursor-pointer ${
+                  activeTab === tabKey
+                    ? darkMode
+                      ? 'text-white border-b-2 border-sky-400 font-bold'
+                      : 'text-slate-950 border-b-2 border-slate-950 font-bold'
+                    : darkMode
+                    ? 'text-slate-400 hover:text-white'
+                    : 'text-slate-600 hover:text-slate-950'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </nav>
+        </div>
 
-        {/* Barre de Recherche Principale (Classes & Enseignants) */}
-        <div className="flex-1 max-w-xs md:max-w-sm lg:max-w-md mx-2">
+        {/* Zone 2: Global Search (Classes & Enseignants) */}
+        <div className="flex-1 max-w-xs md:max-w-sm mx-2">
           <GlobalSearchOmnibar
             classes={classes}
             teachers={teachers}
             onSelectClass={(classId) => {
               setSelectedClassId(classId);
               setActiveTab('editor');
+              setEditorSubMode('single');
               setGridViewMode('class');
             }}
             onSelectTeacher={(teacherId) => {
               setSelectedTeacherId(teacherId);
               setActiveTab('editor');
+              setEditorSubMode('single');
               setGridViewMode('teacher');
             }}
             onOpenTeacherDetail={(teacherId) => {
@@ -3100,23 +3718,42 @@ export default function App() {
           />
         </div>
 
-        {/* Zone 3: Quick Action Buttons & Print */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Zone 3: Practical Quick Actions (Undo/Redo, Classes, Teachers, Print, Theme, Auth) */}
+        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+          <button
+            onClick={handleUndo}
+            disabled={historyPast.length === 0}
+            title="Précédent : Annuler la dernière action (Ctrl+Z)"
+            className="px-2.5 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-700 disabled:opacity-40 text-white flex items-center gap-1 shadow-2xs transition-all cursor-pointer"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>
+              Précédent {historyPast.length > 0 ? `(${historyPast.length})` : ''}
+            </span>
+          </button>
+
+          <button
+            onClick={handleRedo}
+            disabled={historyFuture.length === 0}
+            title="Rétablir (Ctrl+Y)"
+            className="p-1.5 rounded-lg border text-xs font-semibold disabled:opacity-40 flex items-center cursor-pointer bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800"
+          >
+            <RotateCw className="w-3.5 h-3.5" />
+          </button>
+
           <button
             type="button"
             onClick={() => setShowClassManagerModal(true)}
-            className="px-3 py-1.5 text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 shadow-2xs cursor-pointer"
-            title="Ajouter ou supprimer une classe, configurer ses matières et enseignants"
+            className="px-2.5 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1 cursor-pointer"
           >
             <Layers className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">+ Gérer Classe</span>
+            <span className="hidden sm:inline">+ Classe</span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowTeachersDirectoryModal(true)}
-            className="px-3 py-1.5 text-xs font-bold text-teal-800 dark:text-teal-200 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 border border-teal-300 dark:border-teal-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 shadow-2xs cursor-pointer"
-            title="Voir pour chaque enseignant ce qu'il enseigne et son nombre de séances"
+            className="px-2.5 py-1.5 text-xs font-bold text-teal-800 dark:text-teal-200 bg-teal-50 hover:bg-teal-100 dark:bg-teal-950/60 border border-teal-300 dark:border-teal-800 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1 cursor-pointer"
           >
             <Users className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
             <span className="hidden sm:inline">Enseignants</span>
@@ -3124,237 +3761,67 @@ export default function App() {
 
           <button
             onClick={() => window.print()}
-            className="px-3.5 py-1.5 text-xs font-semibold text-white bg-sky-700 rounded-lg hover:bg-sky-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            className="px-3 py-1.5 text-xs font-semibold text-white bg-sky-700 rounded-lg hover:bg-sky-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
           >
             <Printer className="w-3.5 h-3.5" />
-            <span>{tStrings.printPdfBtn}</span>
+            <span className="hidden md:inline">{tStrings.printPdfBtn}</span>
           </button>
+
+          <button
+            onClick={() => setDarkMode((d) => !d)}
+            className={`p-1.5 rounded-lg border cursor-pointer ${
+              darkMode
+                ? 'border-slate-700 text-amber-400 hover:bg-slate-800'
+                : 'border-slate-200 text-slate-700 hover:bg-slate-100'
+            }`}
+            title={darkMode ? 'Mode Clair' : 'Mode Sombre'}
+          >
+            {darkMode ? (
+              <Sun className="w-3.5 h-3.5" />
+            ) : (
+              <Moon className="w-3.5 h-3.5" />
+            )}
+          </button>
+
+          <button
+            onClick={() => {
+              setShowNotifDrawer(true);
+              setUnreadCount(0);
+            }}
+            className={`px-2 py-1.5 text-xs font-medium rounded-lg border flex items-center gap-1 cursor-pointer ${
+              darkMode
+                ? 'bg-slate-800 border-slate-700 text-slate-200'
+                : 'bg-slate-100 border-slate-200 text-slate-700'
+            }`}
+            title="Journal d'audit et notifications"
+          >
+            <Bell className="w-3.5 h-3.5" />
+            {unreadCount > 0 && (
+              <span className="font-mono text-[10px] font-bold text-sky-600 tabular-nums">
+                {unreadCount}
+              </span>
+            )}
+          </button>
+
+          {user ? (
+            <button
+              onClick={() => signOut(auth)}
+              className="px-2 py-1.5 text-xs font-medium border border-slate-300 rounded-lg flex items-center gap-1 cursor-pointer"
+              title="Déconnexion"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+            </button>
+          ) : (
+            <button
+              onClick={() => signInWithPopup(auth, googleProvider)}
+              className="px-2 py-1.5 text-xs font-medium border border-slate-300 rounded-lg flex items-center gap-1 cursor-pointer"
+              title="Synchronisation Cloud"
+            >
+              <LogIn className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </header>
-
-      {/* =====================================================================
-          WORKSPACE GOVERNANCE BAR (Multi-Campus, Scenario, Undo/Redo, Role, Lang, Theme)
-         ===================================================================== */}
-      <div
-        className={`border-b px-6 py-2.5 no-print ${
-          darkMode
-            ? 'bg-slate-900/80 border-slate-800'
-            : 'bg-white border-slate-200'
-        }`}
-      >
-        <div className="max-w-[1440px] mx-auto flex flex-wrap items-center justify-between gap-3">
-          {/* Left: Multi-Campus, Year, Scenario & Quality Score */}
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <select
-              value={selectedCampus}
-              onChange={(e) => setSelectedCampus(e.target.value)}
-              aria-label="Sélectionner l'établissement"
-              className={`px-2.5 py-1 rounded border text-xs font-medium ${
-                darkMode
-                  ? 'bg-slate-800 border-slate-700 text-slate-100'
-                  : 'bg-slate-50 border-slate-200 text-slate-900'
-              }`}
-            >
-              <option value="Al-Kawthar — Campus Principal Jeddah">
-                Al-Kawthar — Campus Principal Jeddah
-              </option>
-              <option value="Al-Kawthar — Section Francophone & IB">
-                Al-Kawthar — Section Francophone & IB
-              </option>
-              <option value="Al-Kawthar — Section Américaine & Internationale">
-                Al-Kawthar — Section Américaine & Internationale
-              </option>
-            </select>
-
-            <span aria-hidden="true" className="text-slate-400">
-              ·
-            </span>
-
-            <select
-              value={scenario}
-              onChange={(e) => setScenario(e.target.value as ScheduleScenario)}
-              aria-label="Scénario horaire"
-              className={`px-2.5 py-1 rounded border text-xs font-medium ${
-                darkMode
-                  ? 'bg-slate-800 border-slate-700 text-slate-100'
-                  : 'bg-slate-50 border-slate-200 text-slate-900'
-              }`}
-            >
-              <option value="standard">Scénario : Standard ({schoolYear})</option>
-              <option value="ramadan">Scénario : Horaire Ramadan (35m)</option>
-              <option value="summer">Scénario : Horaire d'Été</option>
-              <option value="exams">Scénario : Semaine d'Examens</option>
-            </select>
-
-            <span aria-hidden="true" className="text-slate-400">
-              ·
-            </span>
-
-            <span className="tabular-nums font-medium">
-              Qualité : {qualityReport.globalScore}/100
-            </span>
-
-            <span aria-hidden="true" className="text-slate-400">
-              ·
-            </span>
-
-            <span className="tabular-nums">
-              {conflicts.length === 0
-                ? '0 conflit'
-                : `${conflicts.length} alerte(s)`}
-            </span>
-
-            <span aria-hidden="true" className="text-slate-400">
-              ·
-            </span>
-
-            <button
-              onClick={() =>
-                setPublicationStatus((s) =>
-                  s === 'published' ? 'draft' : 'published'
-                )
-              }
-              className={`underline font-medium ${
-                publicationStatus === 'published'
-                  ? 'text-emerald-600'
-                  : 'text-amber-600'
-              }`}
-            >
-              {publicationStatus === 'published'
-                ? 'Statut : Publié & Validé'
-                : 'Statut : Version Provisoire'}
-            </button>
-          </div>
-
-          {/* Right: Prominent Précédent (Undo) / Redo, Role Selector, Language FR/AR/EN, Dark Mode, Notifications, Auth */}
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Prominent Précédent / Retour en arrière button */}
-            <div className="flex items-center gap-1">
-              <button
-                onClick={handleUndo}
-                disabled={historyPast.length === 0}
-                title="Précédent : Retourner en arrière / Annuler la dernière action (Raccourci : Ctrl+Z)"
-                className="px-3 py-1.5 rounded-lg text-xs font-black bg-rose-600 hover:bg-rose-700 disabled:opacity-40 disabled:hover:bg-rose-600 text-white flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
-              >
-                <RotateCcw className="w-3.5 h-3.5 text-rose-100" />
-                <span>↩ Précédent {historyPast.length > 0 ? `(${historyPast.length})` : ''}</span>
-              </button>
-              <button
-                onClick={handleRedo}
-                disabled={historyFuture.length === 0}
-                title="Rétablir la modification (Redo - Raccourci : Ctrl+Y)"
-                className="p-1.5 rounded-lg border text-xs font-semibold disabled:opacity-40 flex items-center gap-1 cursor-pointer bg-slate-100 hover:bg-slate-200 border-slate-300 text-slate-800"
-              >
-                <RotateCw className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Rétablir</span>
-              </button>
-            </div>
-
-            {/* Role Selector */}
-            <select
-              value={roleMode}
-              onChange={(e) => {
-                const nextRole = e.target.value as UserRole;
-                setRoleMode(nextRole);
-                if (nextRole === 'teacher') {
-                  setGridViewMode('teacher');
-                }
-              }}
-              aria-label="Rôle utilisateur"
-              className={`px-2.5 py-1 rounded border text-xs font-medium ${
-                darkMode
-                  ? 'bg-slate-800 border-slate-700 text-slate-100'
-                  : 'bg-slate-100 border-slate-200 text-slate-800'
-              }`}
-            >
-              <option value="admin">Rôle : Administrateur Principal</option>
-              <option value="section_head">Rôle : Responsable de Section</option>
-              <option value="coordinator">Rôle : Coordinateur Pédagogique</option>
-              <option value="teacher">Rôle : Portail Enseignant</option>
-            </select>
-
-            {/* Language Selector FR / AR / EN */}
-            <div
-              className={`flex items-center p-0.5 rounded border text-xs ${
-                darkMode
-                  ? 'bg-slate-800 border-slate-700'
-                  : 'bg-slate-100 border-slate-200'
-              }`}
-            >
-              {(['fr', 'ar', 'en'] as const).map((l) => (
-                <button
-                  key={l}
-                  onClick={() => setLang(l)}
-                  className={`px-2 py-0.5 rounded text-[11px] font-semibold uppercase transition-colors ${
-                    lang === l
-                      ? 'bg-sky-700 text-white'
-                      : 'text-slate-500 hover:text-slate-900'
-                  }`}
-                >
-                  {l === 'ar' ? 'عربي' : l.toUpperCase()}
-                </button>
-              ))}
-            </div>
-
-            {/* Dark Mode Toggle */}
-            <button
-              onClick={() => setDarkMode((d) => !d)}
-              className={`p-1.5 rounded border ${
-                darkMode
-                  ? 'border-slate-700 text-amber-400 hover:bg-slate-800'
-                  : 'border-slate-200 text-slate-700 hover:bg-slate-100'
-              }`}
-              title={darkMode ? 'Mode Clair' : 'Mode Sombre'}
-            >
-              {darkMode ? (
-                <Sun className="w-3.5 h-3.5" />
-              ) : (
-                <Moon className="w-3.5 h-3.5" />
-              )}
-            </button>
-
-            {/* Notifications & Audit Log Button */}
-            <button
-              onClick={() => {
-                setShowNotifDrawer(true);
-                setUnreadCount(0);
-              }}
-              className={`px-2.5 py-1 text-xs font-medium rounded border flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
-                darkMode
-                  ? 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
-                  : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
-              }`}
-            >
-              <Bell className="w-3.5 h-3.5" />
-              <span>Journal</span>
-              {unreadCount > 0 && (
-                <span className="font-mono text-[11px] font-bold text-sky-600 tabular-nums">
-                  ({unreadCount})
-                </span>
-              )}
-            </button>
-
-            {/* Cloud Auth */}
-            {user ? (
-              <button
-                onClick={() => signOut(auth)}
-                className="px-2.5 py-1 text-xs font-medium border border-slate-300 rounded flex items-center gap-1 whitespace-nowrap shrink-0"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Déconnexion</span>
-              </button>
-            ) : (
-              <button
-                onClick={() => signInWithPopup(auth, googleProvider)}
-                className="px-2.5 py-1 text-xs font-medium border border-slate-300 rounded flex items-center gap-1 whitespace-nowrap shrink-0"
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>Cloud Sync</span>
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
 
       {/* LIVE TOAST NOTIFICATION */}
       {liveToast && (
@@ -3378,7 +3845,7 @@ export default function App() {
       )}
 
       {/* =====================================================================
-          aSc TIMETABLES RIBBON BAR & INTERACTIVE DIALOGS (Constraints, Horaires, Breaks, Assistant, All Settings)
+          aSc TIMETABLES RIBBON BAR & INTERACTIVE DIALOGS
          ===================================================================== */}
       <AscTimetablesRibbonAndDialogs
         activeModal={activeAscModal}
@@ -3434,69 +3901,72 @@ export default function App() {
       {/* =====================================================================
           MAIN WORKSPACE CONTENT
          ===================================================================== */}
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-6 py-6">
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-4 sm:px-6 py-4">
         {/* ===================================================================
             MODULE 1: ÉDITEUR VISUEL INTERACTIF & VUE ENSEMBLE (TOUTES LES CLASSES)
            =================================================================== */}
         {activeTab === 'editor' && (
-          <div className="space-y-4">
-            {/* Top Mode Switcher: Vue Ensemble (Toutes les classes) vs Grille Individuelle vs Loads & Matières */}
+          <div className="space-y-3">
+            {/* Compact Mode Switcher: Vue Ensemble + Matières à côté vs Grille Individuelle vs Loads */}
             <div
-              className={`border rounded-lg p-3.5 flex flex-wrap items-center justify-between gap-3 no-print ${
+              className={`border rounded-lg px-3 py-2 flex flex-wrap items-center justify-between gap-2 no-print ${
                 darkMode
                   ? 'bg-slate-900 border-slate-800'
                   : 'bg-white border-slate-200'
               }`}
             >
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => setEditorSubMode('ensemble')}
-                  className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 ${
+                  className={`px-3 py-1.5 text-xs font-bold rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                     editorSubMode === 'ensemble'
                       ? 'bg-slate-900 text-white shadow-xs'
                       : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
                 >
-                  <LayoutGrid className="w-4 h-4 text-sky-400" />
+                  <LayoutGrid className="w-3.5 h-3.5 text-sky-400" />
                   <span>
-                    Vue Ensemble (Toutes les Classes · Switch Intelligent)
+                    1. Vue d'Ensemble & Placement Manuel (Matières à Côté)
                   </span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setEditorSubMode('single')}
-                  className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 ${
+                  className={`px-3 py-1.5 text-xs font-bold rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                     editorSubMode === 'single'
                       ? 'bg-slate-900 text-white shadow-xs'
                       : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
                 >
-                  <Calendar className="w-4 h-4 text-emerald-400" />
-                  <span>
-                    Grille Individuelle (Classe / Prof / Salle / Matière)
-                  </span>
+                  <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>2. Grille par Classe / Prof / Salle</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setEditorSubMode('loads')}
-                  className={`px-3.5 py-2 text-xs font-bold rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 ${
+                  className={`px-3 py-1.5 text-xs font-bold rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                     editorSubMode === 'loads'
                       ? 'bg-slate-900 text-white shadow-xs'
                       : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
                 >
-                  <BookOpen className="w-4 h-4 text-amber-400" />
-                  <span>
-                    Tableaux Load Teachers, Load Classes & Horaires par Groupe
-                  </span>
+                  <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+                  <span>3. Charges (Load Teachers & Load Classes)</span>
                 </button>
               </div>
 
               {/* Clean Grouped Export & Print Menus */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-slate-500 hidden md:inline tabular-nums">
+                  Qualité {qualityReport.globalScore}/100 ·{' '}
+                  {conflicts.length === 0
+                    ? '0 conflit'
+                    : `${conflicts.length} alerte(s)`}
+                </span>
+
                 {/* Excel Export Menu */}
                 <div className="relative">
                   <button
@@ -3505,8 +3975,7 @@ export default function App() {
                       setExportDropdownOpen(!exportDropdownOpen);
                       setPrintDropdownOpen(false);
                     }}
-                    className="px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
-                    title="Exporter les tableaux vers Excel avec le design exact"
+                    className="px-2.5 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
                   >
                     <FileSpreadsheet className="w-3.5 h-3.5" />
                     <span>Exporter Excel</span>
@@ -3514,7 +3983,7 @@ export default function App() {
 
                   {exportDropdownOpen && (
                     <div
-                      className="absolute right-0 top-full mt-1 w-52 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                      className="absolute right-0 top-full mt-1 w-52 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50"
                       onMouseLeave={() => setExportDropdownOpen(false)}
                     >
                       <button
@@ -3564,7 +4033,7 @@ export default function App() {
                       setPrintDropdownOpen(!printDropdownOpen);
                       setExportDropdownOpen(false);
                     }}
-                    className="px-3 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+                    className="px-2.5 py-1.5 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700 rounded-lg flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer"
                   >
                     <Printer className="w-3.5 h-3.5 text-sky-600" />
                     <span>Imprimer Rapports</span>
@@ -3572,7 +4041,7 @@ export default function App() {
 
                   {printDropdownOpen && (
                     <div
-                      className="absolute right-0 top-full mt-1 w-56 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50 animate-in fade-in slide-in-from-top-1"
+                      className="absolute right-0 top-full mt-1 w-56 rounded-xl shadow-xl border bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 py-1.5 z-50"
                       onMouseLeave={() => setPrintDropdownOpen(false)}
                     >
                       <button
@@ -3616,12 +4085,29 @@ export default function App() {
               </div>
             </div>
 
-            {/* SUB-MODE A: VUE ENSEMBLE (ALL CLASSES TOGETHER + SMART SWITCH) */}
+            {/* SUB-MODE A: VUE ENSEMBLE + STUDIO IA + MATIÈRES À CÔTÉ */}
             {editorSubMode === 'ensemble' && (
               <MasterEnsembleMatrix
                 classes={classes}
                 teachers={teachers}
                 lockedSlotsByClass={lockedSlotsByClass}
+                frozenClassIds={frozenClassIds}
+                onToggleFreezeClass={handleToggleFreezeClass}
+                onSetFrozenClassIds={setFrozenClassIds}
+                frozenSubjects={frozenSubjects}
+                onToggleFreezeSubject={handleToggleFreezeSubject}
+                unplacedLessons={unplacedLessons}
+                onAddManualUnplacedLesson={handleAddManualUnplacedLesson}
+                onMoveSlotToSideTray={handleMoveSlotToSideTray}
+                onPlaceCardFromSideTray={handlePlaceCardFromSideTray}
+                onRemoveUnplacedCard={handleRemoveUnplacedCard}
+                onAutoPlaceSideTrayCards={handleAutoPlaceSideTrayCards}
+                onClearSideTray={handleClearSideTray}
+                aiOrderInput={aiOrderInput}
+                onChangeAiOrderInput={setAiOrderInput}
+                onGenerateWithAiOrder={handleGenerateWithAiOrder}
+                isGeneratingAiOrder={isGeneratingAiOrder}
+                lastGenerationReport={lastGenerationReport}
                 selectedCategory={selectedCategory}
                 onSelectCategory={setSelectedCategory}
                 onSwitchSlots={handleSwitchSlotsInAnyClass}
