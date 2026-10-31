@@ -240,7 +240,7 @@ Génère l'emploi du temps complet optimisé pour cette classe en respectant str
     }
   });
 
-  // REST API: Gemini AI Generate by User Idea / Custom Order (Multi-Class with Frozen Classes & Side Tray Reserve)
+  // REST API: Gemini AI Generate by User Idea / Custom Structural & Pedagogical Order
   app.post('/api/gemini/generate-by-order', async (req, res) => {
     try {
       const ai = getAiClient();
@@ -250,27 +250,36 @@ Génère l'emploi du temps complet optimisé pour cette classe en respectant str
         frozenSubjects,
         targetClassNames,
         allSubjects,
+        allTeacherNames,
       } = req.body || {};
 
-      const prompt = `Tu es le moteur IA de planification d'emplois du temps scolaires de ChronoScolaire AI (Al-Kawthar International Schools).
-L'utilisateur souhaite générer les emplois du temps selon cette idée / cet ordre précis :
-"${userOrder || 'Mettre les matières principales le matin (P1-P4) et équilibrer la semaine sans conflit.'}"
+      const prompt = `Tu es l'architecte IA de planification d'emplois du temps scolaires de ChronoScolaire AI (Al-Kawthar International Schools).
+L'utilisateur souhaite traiter et appliquer cet ordre structurel et pédagogique sans endommager les autres classes :
+"""
+${userOrder || 'Mettre les matières principales le matin (P1-P4), organiser les enseignants multi-départements (matin dépt 1 / après-midi dépt 2) et éviter tout chevauchement horaire ou pause.'}
+"""
 
-Classes dont les positions des matières sont GARDÉES fixes (ne pas toucher) :
-${JSON.stringify(frozenClassNames || [])}
-
-Matières dont les positions actuelles sont figées :
-${JSON.stringify(frozenSubjects || [])}
-
-Classes cibles à générer / réorganiser :
+Classes actuellement présentes dans l'établissement :
 ${JSON.stringify(targetClassNames || [])}
 
-Liste des matières existantes dans l'école :
+Classes figées explicitement par l'utilisateur :
+${JSON.stringify(frozenClassNames || [])}
+
+Matières existantes :
 ${JSON.stringify(allSubjects || [])}
 
-Règle fondamentale :
-- Si une matière n'a pas de place logique sans conflit d'enseignant ou d'indisponibilité, elle sera automatiquement laissée "à côté" dans la réserve manuelle à droite de la Vue d'Ensemble.
-- Analyse l'idée/l'ordre demandé par l'utilisateur et traduis-le en directives de placement précises (matières à privilégier le matin P1-P4, matières à placer en fin de journée P5-P8, périodes interdites éventuelles, ordre de priorité des matières, et résumé clair en français).`;
+Enseignants existants :
+${JSON.stringify(allTeacherNames || [])}
+
+Règles fondamentales :
+1. Extrais toutes les instructions structurelles contenues dans l'ordre :
+   - Scissions ou créations de classes (classSplits : ex. scinder "G3 Boys" en ["Grade 3A Boys (الصف الثالث أ)", "Grade 3B Boys (الصف الثالث ب)"])
+   - Répartition des matières et enseignants par classe (teacherAssignments)
+   - Transferts vers les professeurs principaux / Homeroom teachers (homeroomTransfers : ex. retirer Computing de Grade 1 et Grade 2 pour le confier aux Homeroom teachers)
+   - Séances communes / regroupées entre deux classes (combinedSessions : ex. Library avec Ms. Joudy commune pour 4A et 4B)
+   - Cibles de charges horaires des enseignants (teacherTargetLoads)
+   - Séances complémentaires à ajouter (supplementarySessions)
+2. Pour les enseignants qui interviennent dans deux départements ou sections, active organizeMultiDepartmentHalfDay=true afin qu'ils donnent cours le matin (P1-P4) dans un département et l'après-midi (P5-P8) dans l'autre département, sans intersection d'horaires ni dépassement sur les pauses (breaks).`;
 
       const response = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
@@ -285,23 +294,98 @@ Règle fondamentale :
                 description:
                   "Explication concise en français de la façon dont l'ordre demandé est appliqué.",
               },
+              organizeMultiDepartmentHalfDay: {
+                type: Type.BOOLEAN,
+                description:
+                  "True pour regrouper le temps des enseignants multi-départements (matin pour un département, après-midi pour l'autre).",
+              },
+              classSplits: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    sourceClassName: { type: Type.STRING },
+                    newClassNames: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                    },
+                  },
+                  required: ['sourceClassName', 'newClassNames'],
+                },
+              },
+              teacherAssignments: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    className: { type: Type.STRING },
+                    subject: { type: Type.STRING },
+                    teacher: { type: Type.STRING },
+                    periodsPerWeek: { type: Type.INTEGER },
+                  },
+                  required: ['className', 'subject', 'teacher'],
+                },
+              },
+              homeroomTransfers: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    classNamePattern: { type: Type.STRING },
+                    subject: { type: Type.STRING },
+                    fromTeacher: { type: Type.STRING },
+                  },
+                  required: ['classNamePattern', 'subject'],
+                },
+              },
+              combinedSessions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    classNames: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                    },
+                    subject: { type: Type.STRING },
+                    teacher: { type: Type.STRING },
+                  },
+                  required: ['classNames', 'subject', 'teacher'],
+                },
+              },
+              teacherTargetLoads: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    teacher: { type: Type.STRING },
+                    targetPeriods: { type: Type.INTEGER },
+                  },
+                  required: ['teacher', 'targetPeriods'],
+                },
+              },
+              supplementarySessions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    subject: { type: Type.STRING },
+                    deltaPeriods: { type: Type.INTEGER },
+                  },
+                  required: ['subject', 'deltaPeriods'],
+                },
+              },
               morningPrioritySubjects: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description:
-                  'Matières à placer en priorité le matin (P1 à P4) selon la demande.',
               },
               afternoonSubjects: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description:
-                  "Matières à placer plutôt l'après-midi ou en fin de matinée (P5 à P8).",
               },
               forbiddenPeriods: {
                 type: Type.ARRAY,
                 items: { type: Type.INTEGER },
-                description:
-                  "Numéros de périodes (1 à 8) à éviter globalement si l'utilisateur l'a demandé (sinon tableau vide).",
               },
               subjectSpecificRules: {
                 type: Type.ARRAY,
@@ -327,12 +411,11 @@ Règle fondamentale :
               },
               maxSameSubjectPerDay: {
                 type: Type.INTEGER,
-                description:
-                  'Nombre maximum de séances de la même matière par jour (1 ou 2).',
               },
             },
             required: [
               'summary',
+              'organizeMultiDepartmentHalfDay',
               'morningPrioritySubjects',
               'afternoonSubjects',
               'forbiddenPeriods',
@@ -347,10 +430,16 @@ Règle fondamentale :
       res.json(parsed);
     } catch (error: unknown) {
       console.error('Gemini generate-by-order error:', error);
-      // Graceful fallback if API key is missing or quota reached so generation still works deterministically
       res.json({
         summary:
-          "Ordre appliqué avec le moteur logique : matières fondamentales priorisées le matin (P1-P4), classes sélectionnées figées, et séances sans créneau logique placées à côté.",
+          "Ordre appliqué avec le moteur intelligent : respect strict des horaires et pauses (0 intersection), organisation matin/après-midi des enseignants multi-départements, conservation des classes non ciblées.",
+        organizeMultiDepartmentHalfDay: true,
+        classSplits: [],
+        teacherAssignments: [],
+        homeroomTransfers: [],
+        combinedSessions: [],
+        teacherTargetLoads: [],
+        supplementarySessions: [],
         morningPrioritySubjects: [
           'Maths',
           'Mathematics',

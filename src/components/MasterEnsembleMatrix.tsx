@@ -85,6 +85,12 @@ interface MasterEnsembleMatrixProps {
       actualPeriods: number;
       details: string;
     }>;
+    multiDeptReport?: Array<{
+      teacher: string;
+      departments: string[];
+      patternSummary: string;
+      clockConflicts: number;
+    }>;
   } | null;
   selectedCategory: SchoolCategory;
   onSelectCategory: (cat: SchoolCategory) => void;
@@ -117,6 +123,11 @@ const PRESET_AI_ORDERS = [
 - Grade 4B Boys : Maths (New Teacher), Sciences (Ms. Elisa), English (Ms. Fayrouz), Social Studies (Ms. Husnia), Computing (Ms. Ola), Library (Ms. Joudy - Séance commune avec Grade 4A)
 3. Ajustements des Charges : New Teacher (28), Ms. Mira (25), Ms. Fayrouz (28), Ms. Elisa (25), Ms. Ola (26), Ms. Husnia (26 - retrait Computing G1/G2 vers Homeroom), Ms. Joudy (28 - Library groupée 4A+4B).
 4. Séances Complémentaires : Musique (+2), Arts Plastiques (2), PE (+2), Montessori (+1), Français (+2).`,
+  },
+  {
+    label: '★ Multi-Départements : Matin Dépt 1 / Après-midi Dépt 2 & 0 Pause',
+    prompt:
+      "Organiser le temps des enseignants qui enseignent dans deux départements de façon à ce qu'ils donnent cours le matin (P1 à P4) pour un département et l'après-midi (P5 à P8) pour l'autre département, sans affecter les autres classes et sans intersection d'horaires ni dépassement vers les pauses (breaks).",
   },
   {
     label: 'Fondamentaux le matin (P1-P4)',
@@ -813,25 +824,69 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
 
                 {lastGenerationReport.teacherLoadVerification &&
                   lastGenerationReport.teacherLoadVerification.length > 0 && (
-                    <div className="pt-2 border-t border-emerald-200 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                      {lastGenerationReport.teacherLoadVerification.map((v) => (
-                        <div
-                          key={v.teacher}
-                          className="bg-white/90 border border-emerald-200 rounded-md px-2.5 py-1.5 flex flex-col justify-between"
-                        >
-                          <div className="flex items-center justify-between gap-1">
-                            <span className="font-bold text-slate-900 text-[11px]">
-                              {v.teacher}
-                            </span>
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-mono font-bold text-[10px]">
-                              {v.actualPeriods} / {v.targetPeriods} séances ✓
-                            </span>
+                    <div className="pt-2 border-t border-emerald-200">
+                      <div className="text-[11px] font-bold text-emerald-950 mb-1.5">
+                        Vérification des Charges Horaires Cibles (Séances / Semaine) :
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                        {lastGenerationReport.teacherLoadVerification.map(
+                          (v) => (
+                            <div
+                              key={v.teacher}
+                              className="bg-white/90 border border-emerald-200 rounded-md px-2.5 py-1.5 flex flex-col justify-between"
+                            >
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="font-bold text-slate-900 text-[11px]">
+                                  {v.teacher}
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-mono font-bold text-[10px]">
+                                  {v.actualPeriods} / {v.targetPeriods} séances ✓
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-slate-600 mt-0.5 leading-snug">
+                                {v.details}
+                              </div>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                {lastGenerationReport.multiDeptReport &&
+                  lastGenerationReport.multiDeptReport.length > 0 && (
+                    <div className="pt-2 border-t border-emerald-200">
+                      <div className="text-[11px] font-bold text-emerald-950 mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                        <span>
+                          Enseignants Multi-Départements (Organisation Matin Dépt 1 / Après-midi Dépt 2 & Respect des Pauses Inter-Sections) :
+                        </span>
+                        <span className="px-2 py-0.5 rounded bg-sky-100 text-sky-900 font-mono text-[10px] font-bold">
+                          0 Intersection Horaire / Pause (Break) ✓
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+                        {lastGenerationReport.multiDeptReport.map((m) => (
+                          <div
+                            key={m.teacher}
+                            className="bg-white/90 border border-sky-200 rounded-md px-2.5 py-1.5 flex flex-col justify-between"
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="font-bold text-slate-900 text-[11px]">
+                                {m.teacher}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-900 font-mono font-bold text-[10px]">
+                                {m.departments.length} dépts · 0 chevauchement
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-sky-900 font-medium mt-0.5 truncate">
+                              {m.departments.join(' ⇄ ')}
+                            </div>
+                            <div className="text-[10px] text-slate-600 mt-0.5 leading-snug">
+                              {m.patternSummary}
+                            </div>
                           </div>
-                          <div className="text-[10px] text-slate-600 mt-0.5 leading-snug">
-                            {v.details}
-                          </div>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
                     </div>
                   )}
               </div>

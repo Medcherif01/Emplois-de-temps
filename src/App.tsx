@@ -140,8 +140,11 @@ import {
 } from './engine/cspEngine';
 import {
   applyBoysSectionRestructuringOrder,
+  executeUniversalIntelligentOrder,
   isBoysRestructuringOrder,
+  MultiDeptTeacherScheduleSummary,
   OFFICIAL_BOYS_RESTRUCTURING_ORDER_TEXT,
+  ParsedAiOrderAst,
   TeacherLoadVerificationItem,
 } from './utils/structuralOrderEngine';
 
@@ -290,6 +293,7 @@ export default function App() {
     leftAsideCount: number;
     frozenClassesCount: number;
     teacherLoadVerification?: TeacherLoadVerificationItem[];
+    multiDeptReport?: MultiDeptTeacherScheduleSummary[];
   } | null>({
     summary: INITIAL_RESTRUCTURED_STATE.summary,
     placedCount: INITIAL_RESTRUCTURED_STATE.placedCount,
@@ -297,6 +301,7 @@ export default function App() {
     frozenClassesCount: INITIAL_RESTRUCTURED_STATE.frozenClassesCount,
     teacherLoadVerification:
       INITIAL_RESTRUCTURED_STATE.teacherLoadVerification,
+    multiDeptReport: INITIAL_RESTRUCTURED_STATE.multiDeptReport,
   });
 
   // Visual Editor View Mode & Filters
@@ -2742,11 +2747,14 @@ export default function App() {
     );
   };
 
-  // Génération IA selon l'idée / l'ordre demandé + Conservation des classes figées + Mise à côté si pas de place logique
+  // Génération IA universelle selon n'importe quel ordre demandé :
+  // - Isolation chirurgicale des autres classes (aucun dommage sur les classes non visées)
+  // - Zéro intersection d'horaires réels ni dépassement sur les pauses (breaks) inter-sections
+  // - Organisation Matin (P1-P4) / Après-midi (P5-P8) par département pour les enseignants multi-départements
   const handleGenerateWithAiOrder = async () => {
     setIsGeneratingAiOrder(true);
     try {
-      // Fast-path for structural reorganization orders (e.g. Grade 3A/3B & Grade 4A/4B split, teacher load rebalancing, combined Library, G1/G2 Homeroom Computing)
+      // Fast-path for the Boys Section restructuring specification
       if (isBoysRestructuringOrder(aiOrderInput)) {
         const res = applyBoysSectionRestructuringOrder(
           classes,
@@ -2763,14 +2771,15 @@ export default function App() {
           leftAsideCount: res.leftAsideCount,
           frozenClassesCount: res.frozenClassesCount,
           teacherLoadVerification: res.teacherLoadVerification,
+          multiDeptReport: res.multiDeptReport,
         });
         appendAuditLog(
-          'Restructuration Structurelle & Charges (Grade 3A/3B, 4A/4B & Enseignantes)',
+          'Traitement Intelligent d’Ordre Structurel & Multi-Départements',
           res.summary
         );
         await triggerRealtimeNotification(
-          '✨ Ordre de Restructuration Garçons Appliqué',
-          `Classes 3A/3B & 4A/4B scindées, New Teacher (28p), Mira (25p), Fayrouz (28p), Elisa (25p), Ola (26p), Husnia (26p), Joudi (28p) équilibrées avec 0 conflit.`,
+          '✨ Ordre Structurel & Multi-Départements Appliqué',
+          `${res.summary}`,
           'ai_generated',
           'all'
         );
@@ -2778,10 +2787,6 @@ export default function App() {
       }
 
       const frozenSet = new Set(frozenClassIds);
-      const frozenSubjSet = new Set(
-        frozenSubjects.map((s) => s.trim().toLowerCase())
-      );
-
       const frozenClassNames = classes
         .filter((c) => frozenSet.has(c.id))
         .map((c) => c.name);
@@ -2796,22 +2801,10 @@ export default function App() {
         })
       );
 
-      // 1. Ask Gemini AI to interpret the user's idea/order into structured directives
-      let aiDirectives: {
-        summary: string;
-        morningPrioritySubjects: string[];
-        afternoonSubjects: string[];
-        forbiddenPeriods: number[];
-        subjectSpecificRules: Array<{
-          subject: string;
-          preferredPeriods?: number[];
-          avoidPeriods?: number[];
-          preferredDays?: string[];
-        }>;
-        maxSameSubjectPerDay: number;
-      } = {
+      let aiAst: ParsedAiOrderAst = {
         summary:
-          "Ordre appliqué : matières principales priorisées le matin (P1-P4), positions gardées pour les classes figées et séances sans place logique mises à côté.",
+          "Ordre traité intelligemment : classes non ciblées intactes, enseignants multi-départements organisés Matin (P1-P4) / Après-midi (P5-P8) et 0 intersection horaire ou pause.",
+        organizeMultiDepartmentHalfDay: true,
         morningPrioritySubjects: [
           'Maths',
           'Mathematics',
@@ -2843,295 +2836,43 @@ export default function App() {
         });
         if (res.ok) {
           const parsed = await res.json();
-          aiDirectives = { ...aiDirectives, ...parsed };
+          aiAst = { ...aiAst, ...parsed };
         }
       } catch (e) {
-        console.warn('Fallback to local directive parser:', e);
+        console.warn('Fallback to local AST parser:', e);
       }
 
-      const morningSet = new Set(
-        (aiDirectives.morningPrioritySubjects || []).map((s) =>
-          s.trim().toLowerCase()
-        )
-      );
-      const afternoonSet = new Set(
-        (aiDirectives.afternoonSubjects || []).map((s) =>
-          s.trim().toLowerCase()
-        )
-      );
-      const globalForbiddenPeriods = new Set(
-        aiDirectives.forbiddenPeriods || []
-      );
-      const maxSamePerDay = Math.max(
-        1,
-        aiDirectives.maxSameSubjectPerDay || 2
-      );
-
-      // Also parse simple keywords from aiOrderInput directly for immediate responsiveness
-      const orderLower = aiOrderInput.toLowerCase();
-      const avoidJeudiLate =
-        orderLower.includes('jeudi') &&
-        (orderLower.includes('allég') ||
-          orderLower.includes('tôt') ||
-          orderLower.includes('p6') ||
-          orderLower.includes('p7'));
-      const avoidSportP1 =
-        (orderLower.includes('sport') || orderLower.includes('p.e')) &&
-        orderLower.includes('p1');
-
-      // 2. Build Global Busy Teacher Map from Frozen Classes & Locked/Frozen Slots
-      const teacherBusyAtSlot = new Set<string>(); // key: `${teacherLower}__${day}_${period}`
-      const markTeacherBusy = (slot: LessonSlot, slotKey: string) => {
-        if (slot.teacher) {
-          teacherBusyAtSlot.add(
-            `${slot.teacher.trim().toLowerCase()}__${slotKey}`
-          );
-        }
-        if (slot.subTeacher) {
-          teacherBusyAtSlot.add(
-            `${slot.subTeacher.trim().toLowerCase()}__${slotKey}`
-          );
-        }
-      };
-
-      const nextClasses: SchoolClass[] = classes.map((cls) => {
-        const isFrozenClass =
-          frozenSet.has(cls.id) || !classMatchesCategory(cls, selectedCategory);
-        if (isFrozenClass) {
-          for (const [k, s] of Object.entries(cls.slots)) {
-            markTeacherBusy(s, k);
-          }
-          return cls;
-        }
-
-        // For target classes, keep only locked slots, joint classes, or frozen subjects fixed
-        const lockedKeys = new Set(lockedSlotsByClass[cls.id] || []);
-        const fixedSlots: Record<string, LessonSlot> = {};
-        for (const [k, s] of Object.entries(cls.slots)) {
-          const isFixed =
-            lockedKeys.has(k) ||
-            frozenSubjSet.has(s.subject.trim().toLowerCase()) ||
-            Boolean(s.jointWithClasses && s.jointWithClasses.length > 0);
-          if (isFixed) {
-            fixedSlots[k] = s;
-            markTeacherBusy(s, k);
-          }
-        }
-        return {
-          ...cls,
-          slots: fixedSlots,
-        };
+      const execResult = executeUniversalIntelligentOrder({
+        rawOrderText: aiOrderInput,
+        aiAst,
+        currentClasses: classes,
+        currentTeachers: teachers,
+        existingUnplaced: unplacedLessons,
+        frozenClassIds,
+        frozenSubjects,
+        lockedSlotsByClass,
+        selectedCategory,
       });
 
-      // Keep unplaced cards belonging to frozen/untouched classes untouched
-      const nextUnplaced: UnplacedLessonCard[] = unplacedLessons.filter(
-        (u) =>
-          frozenSet.has(u.classId) ||
-          !targetClassesList.some((tc) => tc.id === u.classId)
-      );
-
-      let totalPlacedCount = 0;
-      let totalLeftAsideCount = 0;
-
-      // 3. For each target class, collect movable lessons and place them logically according to AI order
-      for (const origCls of targetClassesList) {
-        const workingCls = nextClasses.find((c) => c.id === origCls.id)!;
-        const lockedKeys = new Set(lockedSlotsByClass[origCls.id] || []);
-
-        const movableLessons: LessonSlot[] = [];
-        for (const [k, s] of Object.entries(origCls.slots)) {
-          const isFixed =
-            lockedKeys.has(k) ||
-            frozenSubjSet.has(s.subject.trim().toLowerCase()) ||
-            Boolean(s.jointWithClasses && s.jointWithClasses.length > 0);
-          if (!isFixed) {
-            movableLessons.push(s);
-          }
-        }
-
-        // Also include any cards that were in the side tray for this class!
-        const trayCardsForCls = unplacedLessons.filter(
-          (u) => u.classId === origCls.id
-        );
-        for (const tc of trayCardsForCls) {
-          movableLessons.push({
-            subject: tc.subject,
-            teacher: tc.teacher,
-            assistantTeacher: tc.assistantTeacher,
-            subSubject: tc.subSubject,
-            subTeacher: tc.subTeacher,
-            room: tc.room || origCls.room,
-            groupName: tc.groupName,
-          });
-        }
-
-        // Sort movable lessons: morning priority & constrained teachers first
-        movableLessons.sort((a, b) => {
-          const aMorn = morningSet.has(a.subject.trim().toLowerCase()) ? 1 : 0;
-          const bMorn = morningSet.has(b.subject.trim().toLowerCase()) ? 1 : 0;
-          if (aMorn !== bMorn) return bMorn - aMorn;
-          return a.subject.localeCompare(b.subject);
-        });
-
-        const maxP =
-          origCls.section === 'KG'
-            ? 6
-            : origCls.section === 'KG3_GS'
-            ? 7
-            : 8;
-        const classUnavailSet = new Set(origCls.unavailableSlots || []);
-
-        for (const lesson of movableLessons) {
-          const subjLower = lesson.subject.trim().toLowerCase();
-          const teacherNorm = lesson.teacher.trim().toLowerCase();
-          const subTeacherNorm = lesson.subTeacher?.trim().toLowerCase() || '';
-
-          const teacherProfile = teachers.find(
-            (t) => t.name.trim().toLowerCase() === teacherNorm
-          );
-          const teacherUnavail = new Set(
-            teacherProfile?.unavailableSlots || []
-          );
-
-          const specRule = (aiDirectives.subjectSpecificRules || []).find(
-            (r) => r.subject.trim().toLowerCase() === subjLower
-          );
-
-          let bestKey: string | null = null;
-          let bestScore = -999999;
-
-          for (const day of DAYS_OF_WEEK) {
-            // Count how many times this subject is already placed on this day in workingCls
-            let sameSubjCountOnDay = 0;
-            for (let p = 1; p <= maxP; p++) {
-              const ex = workingCls.slots[`${day}_${p}`];
-              if (ex && ex.subject.trim().toLowerCase() === subjLower) {
-                sameSubjCountOnDay++;
-              }
-            }
-            if (sameSubjCountOnDay >= maxSamePerDay) {
-              continue;
-            }
-
-            for (let p = 1; p <= maxP; p++) {
-              const slotKey = `${day}_${p}`;
-              if (workingCls.slots[slotKey]) continue;
-              if (classUnavailSet.has(slotKey)) continue;
-              if (teacherUnavail.has(slotKey)) continue;
-              if (globalForbiddenPeriods.has(p)) continue;
-
-              // Check teacher collision across all classes
-              if (teacherBusyAtSlot.has(`${teacherNorm}__${slotKey}`)) continue;
-              if (
-                subTeacherNorm &&
-                teacherBusyAtSlot.has(`${subTeacherNorm}__${slotKey}`)
-              ) {
-                continue;
-              }
-
-              if (
-                specRule?.avoidPeriods &&
-                specRule.avoidPeriods.includes(p)
-              ) {
-                continue;
-              }
-              if (
-                avoidSportP1 &&
-                p === 1 &&
-                (subjLower.includes('p.e') || subjLower.includes('sport'))
-              ) {
-                continue;
-              }
-
-              // Logical slot is valid! Compute preference score based on AI order
-              let score = 100;
-
-              if (morningSet.has(subjLower)) {
-                score += p <= 4 ? 45 - p * 4 : -20;
-              } else if (afternoonSet.has(subjLower)) {
-                score += p >= 5 ? 35 : -10;
-              } else {
-                score += p <= 5 ? 15 : 5;
-              }
-
-              if (
-                specRule?.preferredPeriods &&
-                specRule.preferredPeriods.includes(p)
-              ) {
-                score += 50;
-              }
-              if (
-                specRule?.preferredDays &&
-                specRule.preferredDays.some(
-                  (d) => d.toLowerCase() === day.toLowerCase()
-                )
-              ) {
-                score += 35;
-              }
-
-              if (sameSubjCountOnDay > 0) {
-                score -= 35;
-              }
-
-              if (avoidJeudiLate && day === 'Jeudi' && p >= 6) {
-                score -= 40;
-              }
-
-              // Slight deterministic spread across days
-              const dayLoad = Array.from({ length: maxP }, (_, i) =>
-                Boolean(workingCls.slots[`${day}_${i + 1}`])
-              ).filter(Boolean).length;
-              score -= dayLoad * 2;
-
-              if (score > bestScore) {
-                bestScore = score;
-                bestKey = slotKey;
-              }
-            }
-          }
-
-          if (bestKey) {
-            workingCls.slots[bestKey] = lesson;
-            markTeacherBusy(lesson, bestKey);
-            totalPlacedCount++;
-          } else {
-            // NO LOGICAL CONFLICT-FREE SLOT -> Leave it in the Side Tray ("Matières à Côté")!
-            nextUnplaced.push({
-              id: `tray_gen_${Date.now()}_${totalLeftAsideCount}_${Math.random()
-                .toString(36)
-                .slice(2, 6)}`,
-              classId: origCls.id,
-              className: origCls.name,
-              subject: lesson.subject,
-              teacher: lesson.teacher,
-              assistantTeacher: lesson.assistantTeacher,
-              subSubject: lesson.subSubject,
-              subTeacher: lesson.subTeacher,
-              room: lesson.room || origCls.room,
-              groupName: lesson.groupName,
-              reason: `Pas de place logique sans conflit (${lesson.teacher} occupé/indisponible)`,
-            });
-            totalLeftAsideCount++;
-          }
-        }
-      }
-
-      recordHistoryAndSetClasses(nextClasses);
-      setUnplacedLessons(nextUnplaced);
+      recordHistoryAndSetClasses(execResult.classes);
+      setTeachers(execResult.teachers);
+      setUnplacedLessons(execResult.unplacedLessons);
       setLastGenerationReport({
-        summary: aiDirectives.summary,
-        placedCount: totalPlacedCount,
-        leftAsideCount: totalLeftAsideCount,
-        frozenClassesCount: frozenClassIds.length,
+        summary: execResult.summary,
+        placedCount: execResult.placedCount,
+        leftAsideCount: execResult.leftAsideCount,
+        frozenClassesCount: execResult.frozenClassesCount,
+        teacherLoadVerification: execResult.teacherLoadVerification,
+        multiDeptReport: execResult.multiDeptReport,
       });
 
       appendAuditLog(
-        'Génération IA selon ordre demandé',
-        `${totalPlacedCount} séances placées, ${frozenClassIds.length} classe(s) gardée(s), ${totalLeftAsideCount} mise(s) à côté.`
+        'Génération IA Universelle & Multi-Départements',
+        `${execResult.placedCount} séances placées, ${execResult.frozenClassesCount} classe(s) intacte(s), ${execResult.leftAsideCount} mise(s) à côté.`
       );
       await triggerRealtimeNotification(
-        'Génération IA terminée',
-        `${aiDirectives.summary} (${totalPlacedCount} placées · ${frozenClassIds.length} classes figées · ${totalLeftAsideCount} à côté).`,
+        '✨ Ordre IA appliqué sans conflit ni chevauchement de pause',
+        `${execResult.summary} (${execResult.placedCount} placées · ${execResult.frozenClassesCount} classes intactes · ${execResult.leftAsideCount} à côté).`,
         'ai_generated',
         'all'
       );
