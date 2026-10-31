@@ -1,10 +1,25 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
+import {
+  initializeFirestore,
+  doc,
+  getDocFromServer,
+  setLogLevel,
+} from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
+// Suppress internal @firebase/firestore WebChannel timeout console.error logs
+// when operating behind proxies or in offline/fallback mode
+setLogLevel('silent');
+
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = initializeFirestore(
+  app,
+  {
+    experimentalForceLongPolling: true,
+  },
+  firebaseConfig.firestoreDatabaseId
+);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
@@ -34,9 +49,24 @@ export interface FirestoreErrorInfo {
   };
 }
 
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+export function handleFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  // Ignore transient offline/unavailable network states so the app continues working locally
+  if (
+    message.includes('the client is offline') ||
+    message.includes('Could not reach Cloud Firestore backend') ||
+    message.includes('unavailable')
+  ) {
+    console.warn('Firestore offline/unavailable, continuing in local mode:', path);
+    return;
+  }
+
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: message,
     authInfo: {
       userId: auth.currentUser?.uid,
       email: auth.currentUser?.email,
@@ -60,10 +90,16 @@ async function testConnection() {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
+    if (
+      error instanceof Error &&
+      error.message.includes('the client is offline')
+    ) {
+      console.warn(
+        'Firestore client is currently offline; operating with local state.'
+      );
     }
   }
 }
 
 testConnection();
+
