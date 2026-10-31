@@ -34,7 +34,7 @@ import {
   CATEGORY_SHORT_LABELS,
   getSubjectVisualStyle,
 } from '../utils/timetableAnalytics';
-import { DAYS_OF_WEEK } from '../data/alkawtharDefaults';
+import { DAYS_OF_WEEK, teacherMatchesSlot } from '../data/alkawtharDefaults';
 
 interface TeacherAssignmentItem {
   id: string; // unique key: `${classId}___${subject}`
@@ -111,9 +111,9 @@ export const TeacherDetailEditModal: React.FC<TeacherDetailEditModalProps> = ({
 
       Object.values(cls.slots).forEach((slot) => {
         if (!slot || !slot.subject) return;
-        const mainMatch = slot.teacher?.trim().toLowerCase() === tLower;
-        const subMatch = slot.subTeacher?.trim().toLowerCase() === tLower;
-        const assistMatch = slot.assistantTeacher?.trim().toLowerCase() === tLower;
+        const mainMatch = teacherMatchesSlot(teacher.name, slot.teacher);
+        const subMatch = teacherMatchesSlot(teacher.name, slot.subTeacher);
+        const assistMatch = teacherMatchesSlot(teacher.name, slot.assistantTeacher);
 
         if (mainMatch) {
           const prev = subjectMap.get(slot.subject) || {

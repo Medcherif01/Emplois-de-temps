@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Edit3,
   FileSpreadsheet,
   GitMerge,
   Inbox,
@@ -30,17 +31,22 @@ import {
   LessonSlot,
   SchoolCategory,
   SchoolClass,
+  SectionType,
   TeacherProfile,
   UnplacedLessonCard,
 } from '../types/timetable';
 import {
   CATEGORY_SHORT_LABELS,
   classMatchesCategory,
+  CURRICULUM_SECTION_CATEGORIES,
   detectIntercalatedSessions,
   evaluateRowSwitchCompatibility,
+  getClassCurriculumSection,
+  getClassOfficialDepartment,
+  getCurriculumShortLabel,
   getPeriodClockTime,
-  getPrimaryClassCategory,
   getSubjectVisualStyle,
+  OFFICIAL_DEPARTMENT_CATEGORIES,
   SwitchCandidateAssessment,
 } from '../utils/timetableAnalytics';
 
@@ -108,6 +114,14 @@ interface MasterEnsembleMatrixProps {
   }) => void;
   onPrintEnsemble: () => void;
   onExportExcelEnsemble?: () => void;
+  onRenameOrModifyClass?: (params: {
+    classId: string;
+    newName: string;
+    newRoom?: string;
+    newCategory?: Exclude<SchoolCategory, 'ALL'>;
+    newSection?: SectionType;
+    newDefaultAssistant?: string;
+  }) => void;
   darkMode?: boolean;
 }
 
@@ -174,12 +188,22 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
   onOpenJointModal,
   onPrintEnsemble,
   onExportExcelEnsemble,
+  onRenameOrModifyClass,
   darkMode = false,
 }) => {
   const [selectedSource, setSelectedSource] = useState<{
     classId: string;
     slotKey: string;
   } | null>(null);
+
+  // Inline Class Rename / Modify state in Vue Ensemble
+  const [editingClassMetaId, setEditingClassMetaId] = useState<string | null>(
+    null
+  );
+  const [editClassNameVal, setEditClassNameVal] = useState('');
+  const [editClassCatVal, setEditClassCatVal] =
+    useState<Exclude<SchoolCategory, 'ALL'>>('Primaire_British_Garcons');
+  const [editClassRoomVal, setEditClassRoomVal] = useState('');
 
   // Selected card from the side tray ("Matières à Côté") waiting to be clicked into the matrix
   const [selectedSideCardId, setSelectedSideCardId] = useState<string | null>(
@@ -906,53 +930,81 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
         }`}
       >
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Category Filter Tabs */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mr-1 flex items-center gap-1">
-              <Layers className="w-3.5 h-3.5 text-sky-600" />
-              <span>Section :</span>
-            </span>
-            {(
-              [
-                'ALL',
-                'KG_Maternelle',
-                'Primaire',
-                'Secondaire',
-                'Boys_Section',
-                'Girls_Section',
-                'French_Section',
-                'American_Section',
-              ] as SchoolCategory[]
-            ).map((cat) => {
-              const count = classes.filter((c) =>
-                classMatchesCategory(c, cat)
-              ).length;
-              const isSelected = selectedCategory === cat;
-              return (
-                <button
-                  key={cat}
-                  onClick={() => onSelectCategory(cat)}
-                  className={`px-2.5 py-1 text-xs font-semibold rounded transition-colors flex items-center gap-1.5 cursor-pointer ${
-                    isSelected
-                      ? 'bg-sky-700 text-white shadow-xs'
-                      : darkMode
-                      ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  <span>{CATEGORY_SHORT_LABELS[cat]}</span>
-                  <span
-                    className={`text-[10px] font-mono px-1 rounded ${
+          {/* Category Filter Tabs: 6 Départements Officiels + 3 Sections */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 mr-1 flex items-center gap-1">
+                <Layers className="w-3 h-3 text-sky-600" />
+                <span>6 Départements :</span>
+              </span>
+              {(
+                ['ALL', ...OFFICIAL_DEPARTMENT_CATEGORIES] as SchoolCategory[]
+              ).map((cat) => {
+                const count = classes.filter((c) =>
+                  classMatchesCategory(c, cat)
+                ).length;
+                const isSelected = selectedCategory === cat;
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => onSelectCategory(cat)}
+                    className={`px-2 py-1 text-[11px] font-semibold rounded transition-colors flex items-center gap-1 cursor-pointer ${
                       isSelected
-                        ? 'bg-sky-900/60 text-sky-100'
-                        : 'bg-slate-200/80 text-slate-600'
+                        ? 'bg-sky-700 text-white shadow-xs'
+                        : darkMode
+                        ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                     }`}
                   >
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
+                    <span>{CATEGORY_SHORT_LABELS[cat]}</span>
+                    <span
+                      className={`text-[10px] font-mono px-1 rounded ${
+                        isSelected
+                          ? 'bg-sky-900/60 text-sky-100'
+                          : 'bg-slate-200/80 text-slate-600'
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 mr-1">
+                3 Sections (Fr / Brit / Am) :
+              </span>
+              {CURRICULUM_SECTION_CATEGORIES.map((cat) => {
+                const count = classes.filter((c) =>
+                  classMatchesCategory(c, cat)
+                ).length;
+                const isSelected = selectedCategory === cat;
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => onSelectCategory(cat)}
+                    className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors flex items-center gap-1 cursor-pointer ${
+                      isSelected
+                        ? 'bg-indigo-700 text-white border-indigo-800 shadow-xs'
+                        : darkMode
+                        ? 'bg-slate-800 border-slate-700 text-indigo-300 hover:bg-slate-700'
+                        : 'bg-indigo-50/70 border-indigo-200 text-indigo-900 hover:bg-indigo-100'
+                    }`}
+                  >
+                    <span>{CATEGORY_SHORT_LABELS[cat]}</span>
+                    <span
+                      className={`text-[10px] font-mono px-1 rounded ${
+                        isSelected
+                          ? 'bg-indigo-950/60 text-indigo-100'
+                          : 'bg-indigo-100 text-indigo-800'
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Right Actions */}
@@ -1211,8 +1263,9 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                     selectedSideCard?.classId === cls.id;
                   const isClassFrozen = frozenSet.has(cls.id);
                   const lockedSet = new Set(lockedSlotsByClass[cls.id] || []);
-                  const catShort =
-                    CATEGORY_SHORT_LABELS[getPrimaryClassCategory(cls)];
+                  const officialDept = getClassOfficialDepartment(cls);
+                  const currSec = getClassCurriculumSection(cls);
+                  const catShort = `${CATEGORY_SHORT_LABELS[officialDept]} · ${getCurriculumShortLabel(currSec)}`;
                   const unplacedForThisClass = unplacedLessons.filter(
                     (u) => u.classId === cls.id
                   ).length;
@@ -1228,7 +1281,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                           : ''
                       }`}
                     >
-                      {/* Sticky Left Column: Class Name + Freeze Position Button (🔒) */}
+                      {/* Sticky Left Column: Class Name + Rename (✏️) + Freeze Position Button (🔒) */}
                       <td
                         className={`sticky left-0 z-10 border border-slate-600 px-1.5 py-0.5 text-left align-middle ${
                           isSideCardTargetRow
@@ -1240,56 +1293,135 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                             : 'bg-[#cbd5e1] text-slate-950'
                         }`}
                       >
-                        <div className="flex items-center justify-between gap-1">
-                          <div className="min-w-0 flex-1">
-                            <div className="text-[11px] font-extrabold leading-tight truncate flex items-center gap-1">
-                              <span>{cls.name}</span>
-                              {unplacedForThisClass > 0 && (
-                                <span
-                                  title={`${unplacedForThisClass} matière(s) à côté pour ${cls.name}`}
-                                  className="px-1 rounded bg-indigo-600 text-white text-[9px] font-mono"
-                                >
-                                  +{unplacedForThisClass}
-                                </span>
-                              )}
-                            </div>
-                            <div
-                              className={`text-[9px] leading-none mt-0.5 truncate ${
-                                isRowActive || isSideCardTargetRow
-                                  ? 'text-sky-300'
-                                  : isClassFrozen
-                                  ? 'text-amber-800 font-semibold'
-                                  : 'text-slate-600'
-                              }`}
+                        {editingClassMetaId === cls.id ? (
+                          <div className="p-1 bg-white text-slate-900 rounded border border-indigo-500 space-y-1 shadow-md">
+                            <input
+                              type="text"
+                              value={editClassNameVal}
+                              onChange={(e) =>
+                                setEditClassNameVal(e.target.value)
+                              }
+                              placeholder="Nom classe"
+                              className="w-full px-1.5 py-0.5 text-[10px] font-bold border border-slate-300 rounded"
+                            />
+                            <select
+                              value={editClassCatVal}
+                              onChange={(e) =>
+                                setEditClassCatVal(
+                                  e.target.value as Exclude<
+                                    SchoolCategory,
+                                    'ALL'
+                                  >
+                                )
+                              }
+                              className="w-full px-1 py-0.5 text-[9px] font-semibold border border-slate-300 rounded bg-white"
                             >
-                              {isClassFrozen ? '🔒 Positions gardées' : catShort}
+                              {OFFICIAL_DEPARTMENT_CATEGORIES.map((d) => (
+                                <option key={d} value={d}>
+                                  {CATEGORY_SHORT_LABELS[d]}
+                                </option>
+                              ))}
+                            </select>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (onRenameOrModifyClass) {
+                                    onRenameOrModifyClass({
+                                      classId: cls.id,
+                                      newName:
+                                        editClassNameVal.trim() || cls.name,
+                                      newCategory: editClassCatVal,
+                                      newRoom:
+                                        editClassRoomVal.trim() || cls.room,
+                                    });
+                                  }
+                                  setEditingClassMetaId(null);
+                                }}
+                                className="flex-1 px-1 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-bold cursor-pointer"
+                              >
+                                OK
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setEditingClassMetaId(null)}
+                                className="px-1 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-bold cursor-pointer"
+                              >
+                                ✕
+                              </button>
                             </div>
                           </div>
+                        ) : (
+                          <div className="flex items-center justify-between gap-0.5">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[11px] font-extrabold leading-tight truncate flex items-center gap-1">
+                                <span>{cls.name}</span>
+                                {unplacedForThisClass > 0 && (
+                                  <span
+                                    title={`${unplacedForThisClass} matière(s) à côté pour ${cls.name}`}
+                                    className="px-1 rounded bg-indigo-600 text-white text-[9px] font-mono"
+                                  >
+                                    +{unplacedForThisClass}
+                                  </span>
+                                )}
+                              </div>
+                              <div
+                                className={`text-[9px] leading-none mt-0.5 truncate ${
+                                  isRowActive || isSideCardTargetRow
+                                    ? 'text-sky-300'
+                                    : isClassFrozen
+                                    ? 'text-amber-800 font-semibold'
+                                    : 'text-slate-600'
+                                }`}
+                              >
+                                {isClassFrozen
+                                  ? '🔒 Positions gardées'
+                                  : catShort}
+                              </div>
+                            </div>
 
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onToggleFreezeClass(cls.id);
-                            }}
-                            title={
-                              isClassFrozen
-                                ? `Positions gardées pour ${cls.name} (cliquer pour débloquer)`
-                                : `Garder les positions des matières pour ${cls.name} lors de la génération`
-                            }
-                            className={`p-1 rounded transition-colors shrink-0 cursor-pointer ${
-                              isClassFrozen
-                                ? 'bg-amber-600 text-white hover:bg-amber-700'
-                                : 'text-slate-600 hover:bg-slate-300/80'
-                            }`}
-                          >
-                            {isClassFrozen ? (
-                              <Lock className="w-3 h-3" />
-                            ) : (
-                              <Unlock className="w-3 h-3 opacity-60" />
-                            )}
-                          </button>
-                        </div>
+                            <div className="flex items-center gap-0.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingClassMetaId(cls.id);
+                                  setEditClassNameVal(cls.name);
+                                  setEditClassCatVal(officialDept);
+                                  setEditClassRoomVal(cls.room);
+                                }}
+                                title={`Renommer ou modifier le département de ${cls.name}`}
+                                className="p-0.5 rounded text-slate-600 hover:bg-slate-300/80 hover:text-indigo-700 transition-colors cursor-pointer"
+                              >
+                                <Edit3 className="w-2.5 h-2.5" />
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onToggleFreezeClass(cls.id);
+                                }}
+                                title={
+                                  isClassFrozen
+                                    ? `Positions gardées pour ${cls.name} (cliquer pour débloquer)`
+                                    : `Garder les positions des matières pour ${cls.name} lors de la génération`
+                                }
+                                className={`p-0.5 rounded transition-colors shrink-0 cursor-pointer ${
+                                  isClassFrozen
+                                    ? 'bg-amber-600 text-white hover:bg-amber-700'
+                                    : 'text-slate-600 hover:bg-slate-300/80'
+                                }`}
+                              >
+                                {isClassFrozen ? (
+                                  <Lock className="w-2.5 h-2.5" />
+                                ) : (
+                                  <Unlock className="w-2.5 h-2.5 opacity-60" />
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        )}
                       </td>
 
                       {/* 40 Period Cells (5 Days × 8 Periods) */}

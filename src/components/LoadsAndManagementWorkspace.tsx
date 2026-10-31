@@ -33,6 +33,8 @@ import {
   CATEGORY_LABELS,
   CATEGORY_SHORT_LABELS,
   ClassLoadBlock,
+  CURRICULUM_SECTION_CATEGORIES,
+  OFFICIAL_DEPARTMENT_CATEGORIES,
   SubjectLoadRow,
   TeacherLoadLineItem,
   TeacherLoadRow,
@@ -130,6 +132,22 @@ interface LoadsAndManagementWorkspaceProps {
     teacherB?: string;
     room: string;
   }) => void;
+  onRenameOrModifyTeacher?: (params: {
+    teacherId?: string;
+    oldName: string;
+    newName: string;
+    category?: Exclude<SchoolCategory, 'ALL'>;
+    maxPeriodsPerWeek?: number;
+    subjects?: string[];
+  }) => void;
+  onRenameOrModifyClass?: (params: {
+    classId: string;
+    newName: string;
+    newRoom?: string;
+    newCategory?: Exclude<SchoolCategory, 'ALL'>;
+    newSection?: SectionType;
+    newDefaultAssistant?: string;
+  }) => void;
   onPrintLoadTeachers: () => void;
   onPrintLoadClasses: () => void;
   onPrintLoadSubjects: () => void;
@@ -142,13 +160,8 @@ interface LoadsAndManagementWorkspaceProps {
 
 const CATEGORIES: SchoolCategory[] = [
   'ALL',
-  'KG_Maternelle',
-  'Primaire',
-  'Secondaire',
-  'Boys_Section',
-  'Girls_Section',
-  'French_Section',
-  'American_Section',
+  ...OFFICIAL_DEPARTMENT_CATEGORIES,
+  ...CURRICULUM_SECTION_CATEGORIES,
 ];
 
 const DAYS: DayOfWeek[] = ['Dimanche', 'Lundi', 'Mardi', 'Mercredi', 'Jeudi'];
@@ -178,6 +191,8 @@ export const LoadsAndManagementWorkspace: React.FC<
   onUpdateSubjectClassLoad,
   onModifyClassLoadItem,
   onModifyTeacherLoadLine,
+  onRenameOrModifyTeacher,
+  onRenameOrModifyClass,
   onCloneClassLoadToClasses,
   onGlobalReplaceTeacherOrSubject,
   onAutoCompleteAllClassesSchedules,
@@ -203,6 +218,20 @@ export const LoadsAndManagementWorkspace: React.FC<
     | 'joint_intercalated'
   >('load_teachers');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Inline editing state for Renaming/Modifying a Teacher Profile (left column of Load Teachers)
+  const [renamingTeacherId, setRenamingTeacherId] = useState<string | null>(null);
+  const [renameTNewName, setRenameTNewName] = useState('');
+  const [renameTCategory, setRenameTCategory] =
+    useState<Exclude<SchoolCategory, 'ALL'>>('KG_Maternelle');
+  const [renameTMaxPeriods, setRenameTMaxPeriods] = useState(24);
+
+  // Inline editing state for Renaming/Modifying a Class Profile (left column of Load Classes)
+  const [renamingClassId, setRenamingClassId] = useState<string | null>(null);
+  const [renameCNewName, setRenameCNewName] = useState('');
+  const [renameCCategory, setRenameCCategory] =
+    useState<Exclude<SchoolCategory, 'ALL'>>('Primaire_British_Garcons');
+  const [renameCRoom, setRenameCRoom] = useState('');
 
   // Inline editing state for Load Teachers (Image 1 table)
   const [editingTeacherLineKey, setEditingTeacherLineKey] = useState<
@@ -422,69 +451,105 @@ export const LoadsAndManagementWorkspace: React.FC<
 
   return (
     <div className="space-y-4">
-      {/* Top Category Classification Bar + Print Buttons */}
-      <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mr-1">
-            Section / Groupe :
-          </span>
-          {CATEGORIES.map((cat) => (
+      {/* Top Category Classification Bar (6 Official Departments + 3 Curriculum Sections) + Print Buttons */}
+      <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-extrabold uppercase tracking-wider text-slate-500 mr-1">
+              6 Départements :
+            </span>
             <button
-              key={cat}
-              onClick={() => onSelectCategory(cat)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                selectedCategory === cat
+              onClick={() => onSelectCategory('ALL')}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                selectedCategory === 'ALL'
                   ? 'bg-slate-900 text-white shadow-xs'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
               }`}
             >
-              {CATEGORY_SHORT_LABELS[cat]}
+              {CATEGORY_SHORT_LABELS.ALL}
             </button>
-          ))}
+            {OFFICIAL_DEPARTMENT_CATEGORIES.map((cat) => (
+              <button
+                key={cat}
+                onClick={() => onSelectCategory(cat)}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  selectedCategory === cat
+                    ? 'bg-sky-700 text-white shadow-xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                {CATEGORY_SHORT_LABELS[cat]}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-extrabold uppercase tracking-wider text-indigo-600 mr-1">
+              3 Sections :
+            </span>
+            {CURRICULUM_SECTION_CATEGORIES.map((cat) => (
+              <button
+                key={cat}
+                onClick={() => onSelectCategory(cat)}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer border ${
+                  selectedCategory === cat
+                    ? 'bg-indigo-700 text-white border-indigo-800 shadow-xs'
+                    : 'bg-indigo-50/70 text-indigo-900 border-indigo-200 hover:bg-indigo-100'
+                }`}
+              >
+                {CATEGORY_SHORT_LABELS[cat]}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          {onExportExcelLoadTeachers && (
+        <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[11px] text-slate-500 font-medium">
+            Chaque enseignant est affiché <strong>individuellement</strong> (toutes ses séances solos et partagées sont additionnées ensemble). Cliquez sur <strong>✏️ Modifier / Renommer</strong> sous le nom d'un prof ou d'une classe pour modifier son nom ou département.
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {onExportExcelLoadTeachers && (
+              <button
+                onClick={onExportExcelLoadTeachers}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-xs cursor-pointer"
+                title="Exporter le tableau Load Teachers vers Microsoft Excel avec le même design et les couleurs"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-100" />
+                Excel Load Teachers
+              </button>
+            )}
+            {onExportExcelLoadClasses && (
+              <button
+                onClick={onExportExcelLoadClasses}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
+                title="Exporter le tableau Load Classes vers Microsoft Excel avec le même design et les couleurs"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-100" />
+                Excel Load Classes
+              </button>
+            )}
             <button
-              onClick={onExportExcelLoadTeachers}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-xs cursor-pointer"
-              title="Exporter le tableau Load Teachers vers Microsoft Excel avec le même design et les couleurs"
+              onClick={onPrintLoadTeachers}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-700 text-white hover:bg-sky-800 shadow-xs cursor-pointer"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-100" />
-              Excel Load Teachers
+              <Printer className="w-3.5 h-3.5" />
+              Imprimer Load Teachers
             </button>
-          )}
-          {onExportExcelLoadClasses && (
             <button
-              onClick={onExportExcelLoadClasses}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-700 shadow-xs cursor-pointer"
-              title="Exporter le tableau Load Classes vers Microsoft Excel avec le même design et les couleurs"
+              onClick={onPrintLoadClasses}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-900 text-white hover:bg-indigo-950 shadow-xs cursor-pointer"
             >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-indigo-100" />
-              Excel Load Classes
+              <Printer className="w-3.5 h-3.5" />
+              Imprimer Load Classes
             </button>
-          )}
-          <button
-            onClick={onPrintLoadTeachers}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-sky-700 text-white hover:bg-sky-800 shadow-xs cursor-pointer"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            Imprimer Load Teachers
-          </button>
-          <button
-            onClick={onPrintLoadClasses}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-900 text-white hover:bg-indigo-950 shadow-xs cursor-pointer"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            Imprimer Load Classes
-          </button>
-          <button
-            onClick={onPrintLoadSubjects}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 text-white hover:bg-slate-900 shadow-xs cursor-pointer"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            Imprimer Load Subjects
-          </button>
+            <button
+              onClick={onPrintLoadSubjects}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 text-white hover:bg-slate-900 shadow-xs cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              Imprimer Load Subjects
+            </button>
+          </div>
         </div>
       </div>
 
@@ -688,34 +753,142 @@ export const LoadsAndManagementWorkspace: React.FC<
                                 rowSpan={span}
                                 className="p-3 bg-slate-200/85 border-r-2 border-slate-400 align-middle text-center select-none"
                               >
-                                <div className="font-extrabold italic text-sm text-slate-900 tracking-tight">
-                                  {row.teacherName}
-                                </div>
-                                <div className="text-[10px] font-semibold text-slate-600 mt-0.5">
-                                  {row.sectionLabel}
-                                </div>
-                                <div className="mt-2 flex flex-col items-center gap-1">
-                                  <button
-                                    onClick={() => {
-                                      setAddingLineForTeacher(row.teacherName);
-                                      setAddLineClassIds([
-                                        classes[0]?.id || 'ps',
-                                      ]);
-                                      setAddLineSubject(
-                                        row.subjects[0] ||
-                                          allSubjectNames[0] ||
-                                          'Français'
-                                      );
-                                      setAddLineGroup('Classe complète');
-                                      setAddLinePeriods(2);
-                                    }}
-                                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-900 hover:bg-sky-700 text-white text-[10px] font-bold transition-colors cursor-pointer"
-                                    title="Ajouter une matière ou classe à cet enseignant"
-                                  >
-                                    <Plus className="w-3 h-3" />
-                                    Ajouter cours
-                                  </button>
-                                </div>
+                                {renamingTeacherId === row.teacherId ? (
+                                  <div className="space-y-1.5 text-left bg-white p-2 rounded-lg border border-sky-400 shadow-xs">
+                                    <label className="block text-[9px] font-extrabold uppercase text-sky-800">
+                                      Nom de l'enseignant(e) :
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={renameTNewName}
+                                      onChange={(e) =>
+                                        setRenameTNewName(e.target.value)
+                                      }
+                                      className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded text-slate-900"
+                                    />
+                                    <label className="block text-[9px] font-extrabold uppercase text-sky-800">
+                                      Département / Section :
+                                    </label>
+                                    <select
+                                      value={renameTCategory}
+                                      onChange={(e) =>
+                                        setRenameTCategory(
+                                          e.target.value as Exclude<
+                                            SchoolCategory,
+                                            'ALL'
+                                          >
+                                        )
+                                      }
+                                      className="w-full px-1.5 py-1 text-[10px] font-semibold border border-slate-300 rounded text-slate-900 bg-white"
+                                    >
+                                      {OFFICIAL_DEPARTMENT_CATEGORIES.map((d) => (
+                                        <option key={d} value={d}>
+                                          Dépt : {CATEGORY_SHORT_LABELS[d]}
+                                        </option>
+                                      ))}
+                                      {CURRICULUM_SECTION_CATEGORIES.map((s) => (
+                                        <option key={s} value={s}>
+                                          Section : {CATEGORY_SHORT_LABELS[s]}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <label className="block text-[9px] font-extrabold uppercase text-sky-800">
+                                      Max séances / semaine :
+                                    </label>
+                                    <input
+                                      type="number"
+                                      min={4}
+                                      max={40}
+                                      value={renameTMaxPeriods}
+                                      onChange={(e) =>
+                                        setRenameTMaxPeriods(
+                                          Number(e.target.value) || 24
+                                        )
+                                      }
+                                      className="w-full px-2 py-1 text-xs font-mono font-bold border border-slate-300 rounded text-slate-900"
+                                    />
+                                    <div className="flex items-center gap-1 pt-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (onRenameOrModifyTeacher) {
+                                            onRenameOrModifyTeacher({
+                                              teacherId: row.teacherId,
+                                              oldName: row.teacherName,
+                                              newName:
+                                                renameTNewName.trim() ||
+                                                row.teacherName,
+                                              category: renameTCategory,
+                                              maxPeriodsPerWeek:
+                                                renameTMaxPeriods,
+                                            });
+                                          }
+                                          setRenamingTeacherId(null);
+                                        }}
+                                        className="flex-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold cursor-pointer"
+                                      >
+                                        Enregistrer
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setRenamingTeacherId(null)
+                                        }
+                                        className="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold cursor-pointer"
+                                      >
+                                        Annuler
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="font-extrabold italic text-sm text-slate-900 tracking-tight">
+                                      {row.teacherName}
+                                    </div>
+                                    <div className="text-[10px] font-semibold text-slate-600 mt-0.5">
+                                      {row.sectionLabel}
+                                    </div>
+                                    <div className="mt-2 flex flex-col items-center gap-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setRenamingTeacherId(row.teacherId);
+                                          setRenameTNewName(row.teacherName);
+                                          setRenameTCategory(row.category);
+                                          setRenameTMaxPeriods(row.maxPeriods);
+                                        }}
+                                        className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded bg-white hover:bg-sky-50 text-slate-800 border border-slate-300 text-[10px] font-bold transition-colors cursor-pointer"
+                                        title="Modifier le nom de l'enseignant(e), son département ou sa charge maximale"
+                                      >
+                                        <Edit3 className="w-3 h-3 text-sky-600" />
+                                        Renommer / Modifier
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setAddingLineForTeacher(
+                                            row.teacherName
+                                          );
+                                          setAddLineClassIds([
+                                            classes[0]?.id || 'ps',
+                                          ]);
+                                          setAddLineSubject(
+                                            row.subjects[0] ||
+                                              allSubjectNames[0] ||
+                                              'Français'
+                                          );
+                                          setAddLineGroup('Classe complète');
+                                          setAddLinePeriods(2);
+                                        }}
+                                        className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded bg-slate-900 hover:bg-sky-700 text-white text-[10px] font-bold transition-colors cursor-pointer"
+                                        title="Ajouter une matière ou classe à cet enseignant"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        + Ajouter cours
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
                               </td>
                             )}
 
@@ -1287,42 +1460,147 @@ export const LoadsAndManagementWorkspace: React.FC<
                                 rowSpan={span}
                                 className="p-3 bg-slate-200/85 border-r-2 border-slate-400 align-middle text-center"
                               >
-                                <div className="font-extrabold italic text-base text-slate-900">
-                                  {block.className}
-                                </div>
-                                <div className="text-[10px] font-bold text-slate-600 mt-0.5">
-                                  {block.categoryLabel} · {block.room}
-                                </div>
-                                <div className="mt-2.5 flex flex-col items-center gap-1.5">
-                                  <button
-                                    onClick={() => {
-                                      setAddingSubjectForClassId(block.classId);
-                                      setNewClassSubjName(
-                                        allSubjectNames[0] || 'Français'
-                                      );
-                                      setNewClassSubjTeacher(
-                                        allTeacherNames[0] || 'Hajar'
-                                      );
-                                      setNewClassSubjGroup('Classe complète');
-                                      setNewClassSubjPeriods(4);
-                                    }}
-                                    className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded bg-slate-900 hover:bg-indigo-700 text-white text-[10px] font-bold cursor-pointer"
-                                  >
-                                    <Plus className="w-3 h-3" />
-                                    + Ajouter matière
-                                  </button>
-                                  <button
-                                    onClick={() => {
-                                      setCloningSourceClassId(block.classId);
-                                      setCloneTargetClassIds([]);
-                                    }}
-                                    className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded bg-white hover:bg-indigo-50 text-slate-700 border border-slate-300 text-[10px] font-bold cursor-pointer"
-                                    title="Copier toutes les matières de cette classe vers d'autres classes"
-                                  >
-                                    <Copy className="w-3 h-3" />
-                                    Cloner classe
-                                  </button>
-                                </div>
+                                {renamingClassId === block.classId ? (
+                                  <div className="space-y-1.5 text-left bg-white p-2 rounded-lg border border-indigo-400 shadow-xs">
+                                    <label className="block text-[9px] font-extrabold uppercase text-indigo-800">
+                                      Nom de la classe :
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={renameCNewName}
+                                      onChange={(e) =>
+                                        setRenameCNewName(e.target.value)
+                                      }
+                                      className="w-full px-2 py-1 text-xs font-bold border border-slate-300 rounded text-slate-900"
+                                    />
+                                    <label className="block text-[9px] font-extrabold uppercase text-indigo-800">
+                                      Département / Section :
+                                    </label>
+                                    <select
+                                      value={renameCCategory}
+                                      onChange={(e) =>
+                                        setRenameCCategory(
+                                          e.target.value as Exclude<
+                                            SchoolCategory,
+                                            'ALL'
+                                          >
+                                        )
+                                      }
+                                      className="w-full px-1.5 py-1 text-[10px] font-semibold border border-slate-300 rounded text-slate-900 bg-white"
+                                    >
+                                      {OFFICIAL_DEPARTMENT_CATEGORIES.map((d) => (
+                                        <option key={d} value={d}>
+                                          Dépt : {CATEGORY_SHORT_LABELS[d]}
+                                        </option>
+                                      ))}
+                                      {CURRICULUM_SECTION_CATEGORIES.map((s) => (
+                                        <option key={s} value={s}>
+                                          Section : {CATEGORY_SHORT_LABELS[s]}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <label className="block text-[9px] font-extrabold uppercase text-indigo-800">
+                                      Salle (Room) :
+                                    </label>
+                                    <input
+                                      type="text"
+                                      value={renameCRoom}
+                                      onChange={(e) =>
+                                        setRenameCRoom(e.target.value)
+                                      }
+                                      className="w-full px-2 py-1 text-xs font-semibold border border-slate-300 rounded text-slate-900"
+                                    />
+                                    <div className="flex items-center gap-1 pt-1">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (onRenameOrModifyClass) {
+                                            onRenameOrModifyClass({
+                                              classId: block.classId,
+                                              newName:
+                                                renameCNewName.trim() ||
+                                                block.className,
+                                              newCategory: renameCCategory,
+                                              newRoom:
+                                                renameCRoom.trim() ||
+                                                block.room,
+                                            });
+                                          }
+                                          setRenamingClassId(null);
+                                        }}
+                                        className="flex-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold cursor-pointer"
+                                      >
+                                        Enregistrer
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setRenamingClassId(null)}
+                                        className="px-2 py-1 rounded bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold cursor-pointer"
+                                      >
+                                        Annuler
+                                      </button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <div className="font-extrabold italic text-base text-slate-900">
+                                      {block.className}
+                                    </div>
+                                    <div className="text-[10px] font-bold text-slate-600 mt-0.5">
+                                      {block.categoryLabel} · {block.room}
+                                    </div>
+                                    <div className="mt-2.5 flex flex-col items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setRenamingClassId(block.classId);
+                                          setRenameCNewName(block.className);
+                                          setRenameCCategory(block.category);
+                                          setRenameCRoom(block.room);
+                                        }}
+                                        className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded bg-white hover:bg-indigo-50 text-slate-800 border border-slate-300 text-[10px] font-bold cursor-pointer"
+                                        title="Renommer la classe ou changer son département / salle"
+                                      >
+                                        <Edit3 className="w-3 h-3 text-indigo-600" />
+                                        Renommer / Modifier
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setAddingSubjectForClassId(
+                                            block.classId
+                                          );
+                                          setNewClassSubjName(
+                                            allSubjectNames[0] || 'Français'
+                                          );
+                                          setNewClassSubjTeacher(
+                                            allTeacherNames[0] || 'Hajar'
+                                          );
+                                          setNewClassSubjGroup(
+                                            'Classe complète'
+                                          );
+                                          setNewClassSubjPeriods(4);
+                                        }}
+                                        className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded bg-slate-900 hover:bg-indigo-700 text-white text-[10px] font-bold cursor-pointer"
+                                      >
+                                        <Plus className="w-3 h-3" />
+                                        + Ajouter matière
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setCloningSourceClassId(block.classId);
+                                          setCloneTargetClassIds([]);
+                                        }}
+                                        className="w-full inline-flex items-center justify-center gap-1 px-2 py-1 rounded bg-white hover:bg-indigo-50 text-slate-700 border border-slate-300 text-[10px] font-bold cursor-pointer"
+                                        title="Copier toutes les matières de cette classe vers d'autres classes"
+                                      >
+                                        <Copy className="w-3 h-3" />
+                                        Cloner classe
+                                      </button>
+                                    </div>
+                                  </>
+                                )}
                               </td>
                             )}
 
@@ -1389,6 +1667,11 @@ export const LoadsAndManagementWorkspace: React.FC<
                                     }
                                     className="w-full bg-transparent font-bold text-slate-800 hover:bg-white focus:bg-white px-1.5 py-0.5 rounded border border-transparent hover:border-slate-300 focus:border-indigo-500 text-xs cursor-pointer"
                                   >
+                                    {!allTeacherNames.includes(item.teacher) && (
+                                      <option value={item.teacher}>
+                                        Prof (partagé) : {item.teacher}
+                                      </option>
+                                    )}
                                     {allTeacherNames.map((t) => (
                                       <option key={t} value={t}>
                                         Prof : {t}

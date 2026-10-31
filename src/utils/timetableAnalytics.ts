@@ -1,7 +1,9 @@
 import {
   BELL_SCHEDULES,
   DAYS_OF_WEEK,
+  normalizeIndividualTeachersList,
   SCHOOL_INFO,
+  splitSlotTeachers,
   teacherMatchesSlot,
 } from '../data/alkawtharDefaults';
 import {
@@ -18,42 +20,91 @@ import {
 import { isCoreSubject, SubjectConfig } from '../engine/cspEngine';
 
 export const CATEGORY_LABELS: Record<SchoolCategory, string> = {
-  ALL: 'Toutes les Sections (35 Classes)',
-  KG_Maternelle: 'Maternelle / KG (Pre-KG, KG1, KG2, KG3 / PS, MS, GS)',
-  Primaire: 'Primaire / Primary (G1 à G6, PP1 à PP5)',
-  Secondaire: 'Secondaire (Collège, Lycée, DP1-DP2, G7-G12 Garçons & Filles)',
-  Boys_Section: 'Section Garçons / Boys Section (G4-G12 Garçons, PEI & DP Boys)',
-  Girls_Section: 'Section Filles / Girls Section (G4-G12 Filles, PEI & DP Girls)',
-  French_Section: 'Section Française (PS-GS, PP1-PP5, PEI1-PEI4, DP1-DP2)',
-  American_Section: 'American Section (High School 10-12 Am.Boys & Am.Girls)',
-  KG_Primary: 'KG & Primary International (Pre-KG à G6)',
+  ALL: 'Tous les Départements & Sections',
+  // Les 6 Départements Officiels
+  KG_Maternelle:
+    'Dépt KG (British) & Maternelle (Français) — Pre-KG à KG3 / PS à GS',
+  Primaire_Francais:
+    'Dépt Primaire Français (PP1 → PEI1) — Département Séparé',
+  Primaire_British_Filles:
+    'Dépt Primaire British Filles (Grade 1 → 6 Filles)',
+  Primaire_British_Garcons:
+    'Dépt Primaire British Garçons (Grade 1 → 6 Garçons)',
+  Secondaire_Filles:
+    'Dépt Secondaire Filles (Français PEI/DP, British G7–12 & Américain Filles)',
+  Secondaire_Garcons:
+    'Dépt Secondaire Garçons (Français PEI/DP, British G7–12 & Américain Garçons)',
+  // Les 3 Sections (Programmes)
+  French_Section:
+    'Section Française (Maternelle PS–GS, Primaire PP1–PEI1, Secondaire PEI2–DP2)',
+  British_Section:
+    'Section British (KG, Primaire 1–6 Filles/Garçons, Secondaire G7–G12)',
+  American_Section:
+    'Section Américaine (High School 10–12 American Filles & Garçons)',
+  // Regroupements transversaux
+  Primaire: 'Tout le Primaire (PP1–PEI1 & Grade 1–6 British Filles/Garçons)',
+  Secondaire: 'Tout le Secondaire (Filles & Garçons — 3 Sections)',
+  Boys_Section: 'Tous Départements Garçons (Primaire 1–6 & Secondaire Garçons)',
+  Girls_Section: 'Tous Départements Filles (Primaire 1–6 & Secondaire Filles)',
+  KG_Primary: 'KG/Maternelle & Primaire',
 };
 
 export const CATEGORY_SHORT_LABELS: Record<SchoolCategory, string> = {
-  ALL: 'Toutes Sections',
-  KG_Maternelle: 'Maternelle (KG)',
-  Primaire: 'Primaire',
-  Secondaire: 'Secondaire',
-  Boys_Section: 'Boys Section',
-  Girls_Section: 'Girls Section',
+  ALL: 'Tout (Tous Dépts)',
+  KG_Maternelle: 'KG & Maternelle (Brit/Fr)',
+  Primaire_Francais: 'Primaire Français (PP1–PEI1)',
+  Primaire_British_Filles: '1–6 British Filles',
+  Primaire_British_Garcons: '1–6 British Garçons',
+  Secondaire_Filles: 'Secondaire Filles (3 Sect.)',
+  Secondaire_Garcons: 'Secondaire Garçons (3 Sect.)',
   French_Section: 'Section Française',
-  American_Section: 'American Section',
-  KG_Primary: 'KG & Primary',
+  British_Section: 'Section British',
+  American_Section: 'Section Américaine',
+  Primaire: 'Tout Primaire',
+  Secondaire: 'Tout Secondaire',
+  Boys_Section: 'Garçons (Tous)',
+  Girls_Section: 'Filles (Toutes)',
+  KG_Primary: 'KG & Primaire',
 };
 
+export const OFFICIAL_DEPARTMENT_CATEGORIES: SchoolCategory[] = [
+  'KG_Maternelle',
+  'Primaire_Francais',
+  'Primaire_British_Filles',
+  'Primaire_British_Garcons',
+  'Secondaire_Filles',
+  'Secondaire_Garcons',
+];
+
+export const CURRICULUM_SECTION_CATEGORIES: SchoolCategory[] = [
+  'French_Section',
+  'British_Section',
+  'American_Section',
+];
+
 /**
- * Checks whether a class belongs to a requested SchoolCategory.
+ * Returns the exact Official Department of a class among the 6 school departments:
+ * 1. KG_Maternelle (KG British + Maternelle Français — same department)
+ * 2. Primaire_Francais (PP1 to PEI1 — separate department)
+ * 3. Primaire_British_Filles (Grade 1 to 6 British Girls — separate department)
+ * 4. Primaire_British_Garcons (Grade 1 to 6 British Boys — separate department)
+ * 5. Secondaire_Filles (Secondary Girls across French, British, American — separate department)
+ * 6. Secondaire_Garcons (Secondary Boys across French, British, American — separate department)
  */
-export function classMatchesCategory(
-  cls: SchoolClass,
-  category: SchoolCategory
-): boolean {
-  if (category === 'ALL') return true;
-  if (cls.category === category) return true;
+export function getClassOfficialDepartment(
+  cls: SchoolClass
+): Exclude<SchoolCategory, 'ALL'> {
+  if (
+    cls.category &&
+    (OFFICIAL_DEPARTMENT_CATEGORIES as string[]).includes(cls.category)
+  ) {
+    return cls.category;
+  }
 
   const n = cls.name.toLowerCase();
 
-  const isKG =
+  // 1. KG (British) & Maternelle (Français) -> Same department
+  if (
     cls.section === 'KG' ||
     cls.section === 'KG3_GS' ||
     n.includes('pre-kg') ||
@@ -62,24 +113,34 @@ export function classMatchesCategory(
     n.includes('kg3') ||
     n === 'ps' ||
     n === 'ms' ||
-    n === 'gs';
+    n === 'gs' ||
+    n.includes('maternelle')
+  ) {
+    return 'KG_Maternelle';
+  }
 
-  const isPrimaire =
-    cls.section === 'Primary' ||
+  const isBoys =
+    n.includes('boys') ||
+    n.includes('garçons') ||
+    n.includes('garcons') ||
+    cls.section === 'Secondary_Boys';
+
+  // 2. PP1 to PEI1 -> Primaire Français (Separate department)
+  if (
     n.startsWith('pp') ||
-    n.includes('g1') ||
-    n.includes('g2') ||
-    n.includes('g3') ||
-    n.includes('g4') ||
-    n.includes('g5') ||
-    n.includes('g6') ||
+    n === 'pei1' ||
+    n === 'pei 1' ||
     n.includes('cp') ||
     n.includes('ce1') ||
     n.includes('ce2') ||
     n.includes('cm1') ||
-    n.includes('cm2');
+    n.includes('cm2')
+  ) {
+    return 'Primaire_Francais';
+  }
 
-  const isSecondaire =
+  // 3 & 4. Secondary (Girls vs Boys across all 3 sections: French PEI2-DP2, British G7-G12, American 10-12)
+  const isSecondary =
     cls.section === 'Secondary_Girls' ||
     cls.section === 'Secondary_Boys' ||
     n.startsWith('pei') ||
@@ -90,10 +151,35 @@ export function classMatchesCategory(
     n.includes('g10') ||
     n.includes('g11') ||
     n.includes('g12') ||
-    n.includes('college') ||
-    n.includes('lycee');
+    n.includes('american') ||
+    n.includes('am.');
 
-  const isFrench =
+  if (isSecondary) {
+    return isBoys ? 'Secondaire_Garcons' : 'Secondaire_Filles';
+  }
+
+  // 5 & 6. Grade 1 to 6 British (Girls vs Boys separate departments)
+  return isBoys ? 'Primaire_British_Garcons' : 'Primaire_British_Filles';
+}
+
+/**
+ * Returns the Curriculum Section of a class among the 3 school sections:
+ * - French_Section (Français)
+ * - British_Section (British)
+ * - American_Section (Américaine)
+ */
+export function getClassCurriculumSection(
+  cls: SchoolClass
+): 'French_Section' | 'British_Section' | 'American_Section' {
+  const n = cls.name.toLowerCase();
+  if (
+    n.includes('american') ||
+    n.includes('am.') ||
+    cls.category === 'American_Section'
+  ) {
+    return 'American_Section';
+  }
+  if (
     n === 'ps' ||
     n === 'ms' ||
     n === 'gs' ||
@@ -101,42 +187,73 @@ export function classMatchesCategory(
     n.startsWith('pei') ||
     n.startsWith('dp') ||
     n.includes('français') ||
-    n.includes('francais');
+    n.includes('francais') ||
+    cls.category === 'French_Section' ||
+    cls.category === 'Primaire_Francais'
+  ) {
+    return 'French_Section';
+  }
+  return 'British_Section';
+}
 
-  const isBoys =
-    n.includes('boys') ||
-    n.includes('garçons') ||
-    n.includes('garcons') ||
-    cls.section === 'Secondary_Boys';
+export function getCurriculumShortLabel(
+  sec: 'French_Section' | 'British_Section' | 'American_Section'
+): string {
+  if (sec === 'French_Section') return 'Français';
+  if (sec === 'American_Section') return 'Américaine';
+  return 'British';
+}
 
-  const isAmerican =
-    n.includes('am.') || n.includes('american');
+/**
+ * Checks whether a class belongs to a requested SchoolCategory (Department or Section).
+ */
+export function classMatchesCategory(
+  cls: SchoolClass,
+  category: SchoolCategory
+): boolean {
+  if (category === 'ALL') return true;
+  if (cls.category === category) return true;
 
-  const isGirls =
-    n.includes('girls') ||
-    n.includes('filles') ||
-    cls.section === 'Secondary_Girls' ||
-    ((n.startsWith('pei') || n.startsWith('dp')) && !isBoys);
-
-  const isKGPrimary = isKG || isPrimaire;
+  const dept = getClassOfficialDepartment(cls);
+  const currSection = getClassCurriculumSection(cls);
 
   switch (category) {
     case 'KG_Maternelle':
-      return isKG;
-    case 'Primaire':
-      return isPrimaire;
-    case 'Secondaire':
-      return isSecondaire;
+    case 'Primaire_Francais':
+    case 'Primaire_British_Filles':
+    case 'Primaire_British_Garcons':
+    case 'Secondaire_Filles':
+    case 'Secondaire_Garcons':
+      return dept === category;
+
     case 'French_Section':
-      return isFrench;
-    case 'Boys_Section':
-      return isBoys;
-    case 'Girls_Section':
-      return isGirls;
+    case 'British_Section':
     case 'American_Section':
-      return isAmerican;
+      return currSection === category;
+
+    case 'Primaire':
+      return (
+        dept === 'Primaire_Francais' ||
+        dept === 'Primaire_British_Filles' ||
+        dept === 'Primaire_British_Garcons'
+      );
+    case 'Secondaire':
+      return dept === 'Secondaire_Filles' || dept === 'Secondaire_Garcons';
+    case 'Boys_Section':
+      return (
+        dept === 'Primaire_British_Garcons' || dept === 'Secondaire_Garcons'
+      );
+    case 'Girls_Section':
+      return (
+        dept === 'Primaire_British_Filles' || dept === 'Secondaire_Filles'
+      );
     case 'KG_Primary':
-      return isKGPrimary;
+      return (
+        dept === 'KG_Maternelle' ||
+        dept === 'Primaire_Francais' ||
+        dept === 'Primaire_British_Filles' ||
+        dept === 'Primaire_British_Garcons'
+      );
     default:
       return true;
   }
@@ -145,26 +262,7 @@ export function classMatchesCategory(
 export function getPrimaryClassCategory(
   cls: SchoolClass
 ): Exclude<SchoolCategory, 'ALL'> {
-  if (cls.category) return cls.category;
-  const n = cls.name.toLowerCase();
-  if (n.includes('am.') || n.includes('american')) return 'American_Section';
-  if (
-    n === 'ps' ||
-    n === 'ms' ||
-    n === 'gs' ||
-    n.startsWith('pp') ||
-    n.startsWith('pei') ||
-    n.startsWith('dp')
-  ) {
-    return 'French_Section';
-  }
-  if (n.includes('boys') || n.includes('garçons') || cls.section === 'Secondary_Boys') {
-    return 'Boys_Section';
-  }
-  if (n.includes('girls') || cls.section === 'Secondary_Girls') {
-    return 'Girls_Section';
-  }
-  return 'KG_Primary';
+  return getClassOfficialDepartment(cls);
 }
 
 export function teacherMatchesCategory(
@@ -175,13 +273,15 @@ export function teacherMatchesCategory(
   if (category === 'ALL') return true;
   if (teacher.category === category) return true;
 
-  // Check if the teacher teaches in any class belonging to this category
+  // Check if the teacher teaches in any class belonging to this category (department or section)
   for (const cls of classes) {
     if (!classMatchesCategory(cls, category)) continue;
     for (const slot of Object.values(cls.slots)) {
       if (
         teacherMatchesSlot(teacher.name, slot.teacher) ||
-        (slot.subTeacher && teacherMatchesSlot(teacher.name, slot.subTeacher))
+        (slot.subTeacher && teacherMatchesSlot(teacher.name, slot.subTeacher)) ||
+        (slot.assistantTeacher &&
+          teacherMatchesSlot(teacher.name, slot.assistantTeacher))
       ) {
         return true;
       }
@@ -191,7 +291,7 @@ export function teacherMatchesCategory(
   const sec = teacher.section.toLowerCase();
   if (category === 'Boys_Section' && sec.includes('boys')) return true;
   if (category === 'Girls_Section' && sec.includes('girls')) return true;
-  if (category === 'KG_Primary' && (sec.includes('kg') || sec.includes('primary')))
+  if (category === 'KG_Maternelle' && (sec.includes('kg') || sec.includes('maternelle')))
     return true;
 
   return false;
@@ -772,7 +872,11 @@ export function computeTeachersLoadReport(
   classes: SchoolClass[],
   categoryFilter: SchoolCategory = 'ALL'
 ): TeacherLoadRow[] {
-  return teachers
+  // Always normalize so every teacher is listed individually ("chaque enseignant seul")
+  // and never as a multi-teacher string like "A / B" or "A & B".
+  const individualTeachers = normalizeIndividualTeachersList(teachers, classes);
+
+  return individualTeachers
     .filter((t) => teacherMatchesCategory(t, categoryFilter, classes))
     .map((t) => {
       const breakdownMap = new Map<
@@ -786,7 +890,8 @@ export function computeTeachersLoadReport(
         }
       >();
 
-      // Line items grouped by (slotKey if joint across classes, or single class + group + subject)
+      // Line items grouped by (classesLabel + subject) so that solo sessions AND shared sessions
+      // with another teacher are counted TOGETHER in one single line item!
       const lineItemsMap = new Map<
         string,
         {
@@ -796,6 +901,8 @@ export function computeTeachersLoadReport(
           subject: string;
           periods: number;
           isJointOrGrouped: boolean;
+          coTeachersSet: Set<string>;
+          sharedCount: number;
         }
       >();
 
@@ -804,16 +911,17 @@ export function computeTeachersLoadReport(
 
       let totalPeriods = 0;
       let jointAndSplitCount = 0;
-      const catsCount = new Map<Exclude<SchoolCategory, 'ALL'>, number>();
+      const deptsCount = new Map<Exclude<SchoolCategory, 'ALL'>, number>();
+      const sectionsSet = new Set<'French_Section' | 'British_Section' | 'American_Section'>();
 
-      // First pass: check all day_period keys across all classes to detect when this teacher teaches multiple classes simultaneously (e.g. MS,GS,PS or PS,MS)
+      // First pass: check all day_period keys across all classes to detect when this teacher teaches multiple classes simultaneously (e.g. 4A+4B Library or MS,GS,PS)
       for (const day of DAYS_OF_WEEK) {
         for (let p = 1; p <= 8; p++) {
           const slotKey = `${day}_${p}`;
           const matchingClassesAtSlot: Array<{
             cls: SchoolClass;
             subj: string;
-            groupLabel: string;
+            coTeachers: string[];
           }> = [];
 
           for (const cls of classes) {
@@ -822,20 +930,30 @@ export function computeTeachersLoadReport(
             const matchPrimary = teacherMatchesSlot(t.name, slot.teacher);
             const matchSub =
               slot.subTeacher && teacherMatchesSlot(t.name, slot.subTeacher);
+            const matchAssistant =
+              slot.assistantTeacher &&
+              teacherMatchesSlot(t.name, slot.assistantTeacher);
 
-            if (matchPrimary || matchSub) {
+            if (matchPrimary || matchSub || matchAssistant) {
               const subj = matchPrimary
                 ? slot.subject
-                : slot.subSubject || slot.subject;
-              const grp =
-                slot.groupName ||
-                (matchSub || (slot.subSubject && slot.subTeacher)
-                  ? 'Demi-groupe / Co-ens.'
-                  : 'Classe complète');
+                : matchSub
+                ? slot.subSubject || slot.subject
+                : slot.subject;
+
+              const allParticipants = [
+                ...splitSlotTeachers(slot.teacher),
+                ...splitSlotTeachers(slot.subTeacher),
+                ...splitSlotTeachers(slot.assistantTeacher),
+              ];
+              const coTeachers = allParticipants.filter(
+                (pName) => pName.toLowerCase() !== t.name.trim().toLowerCase()
+              );
+
               matchingClassesAtSlot.push({
                 cls,
                 subj,
-                groupLabel: grp,
+                coTeachers,
               });
             }
           }
@@ -852,34 +970,38 @@ export function computeTeachersLoadReport(
               .map((m) => m.cls.name)
               .join(',');
             const classIds = sortedMatches.map((m) => m.cls.id);
-            const groupLabel = sortedMatches
-              .map((m) => m.groupLabel)
-              .join(',');
             const subj = sortedMatches[0].subj;
+            const liKey = `JOINT__${classesLabel.toLowerCase()}__${subj.toLowerCase()}`;
 
-            const liKey = `JOINT__${classesLabel}__${subj}__${groupLabel}`;
             if (!lineItemsMap.has(liKey)) {
               lineItemsMap.set(liKey, {
                 classesLabel,
                 classIds,
-                groupLabel,
+                groupLabel: 'Séance commune multi-classes',
                 subject: subj,
                 periods: 0,
                 isJointOrGrouped: true,
+                coTeachersSet: new Set(),
+                sharedCount: 0,
               });
             }
-            lineItemsMap.get(liKey)!.periods += 1;
+            const li = lineItemsMap.get(liKey)!;
+            li.periods += 1;
+            for (const m of sortedMatches) {
+              sectionsSet.add(getClassCurriculumSection(m.cls));
+              for (const ct of m.coTeachers) li.coTeachersSet.add(ct);
+              if (m.coTeachers.length > 0) li.sharedCount += 1;
+            }
 
-            // Also record in classBreakdown on the primary class so nothing is lost
             const primaryCls = sortedMatches[0].cls;
-            const clsCat = getPrimaryClassCategory(primaryCls);
-            catsCount.set(clsCat, (catsCount.get(clsCat) || 0) + 1);
-            const bKey = `${classesLabel}__${subj}`;
+            const clsDept = getClassOfficialDepartment(primaryCls);
+            deptsCount.set(clsDept, (deptsCount.get(clsDept) || 0) + 1);
+            const bKey = `${classesLabel.toLowerCase()}__${subj.toLowerCase()}`;
             if (!breakdownMap.has(bKey)) {
               breakdownMap.set(bKey, {
                 classId: primaryCls.id,
                 className: classesLabel,
-                groupLabel,
+                groupLabel: 'Séance commune multi-classes',
                 subject: subj,
                 periods: 0,
               });
@@ -889,9 +1011,10 @@ export function computeTeachersLoadReport(
         }
       }
 
-      // Second pass: regular single-class slots (or explicit jointWithClasses on a single class record)
+      // Second pass: single-class slots (both solo AND shared sessions with another teacher are counted TOGETHER)
       for (const cls of classes) {
-        const clsCat = getPrimaryClassCategory(cls);
+        const clsDept = getClassOfficialDepartment(cls);
+        const clsCurr = getClassCurriculumSection(cls);
         for (const [slotKey, slot] of Object.entries(cls.slots)) {
           if (processedJointSlotKeys.has(slotKey)) continue;
 
@@ -903,22 +1026,30 @@ export function computeTeachersLoadReport(
             teacherMatchesSlot(t.name, slot.assistantTeacher);
 
           if (matchPrimary || matchSub || matchAssistant) {
-            const subj = matchPrimary
-              ? slot.subject
-              : slot.subSubject || slot.subject;
+            const subj = (
+              matchPrimary
+                ? slot.subject
+                : matchSub
+                ? slot.subSubject || slot.subject
+                : slot.subject
+            ).trim();
+
             totalPeriods += 1;
-            catsCount.set(clsCat, (catsCount.get(clsCat) || 0) + 1);
+            deptsCount.set(clsDept, (deptsCount.get(clsDept) || 0) + 1);
+            sectionsSet.add(clsCurr);
+
+            const allParticipants = [
+              ...splitSlotTeachers(slot.teacher),
+              ...splitSlotTeachers(slot.subTeacher),
+              ...splitSlotTeachers(slot.assistantTeacher),
+            ];
+            const coTeachers = allParticipants.filter(
+              (pName) => pName.toLowerCase() !== t.name.trim().toLowerCase()
+            );
 
             const hasJointAttr =
               slot.jointWithClasses && slot.jointWithClasses.length > 0;
-            const isCoOrSplit =
-              Boolean(slot.subSubject && slot.subTeacher) ||
-              Boolean(slot.assistantTeacher) ||
-              slot.teacher.includes('/') ||
-              slot.teacher.includes('&') ||
-              slot.teacher.includes('+');
-
-            if (hasJointAttr || isCoOrSplit) {
+            if (hasJointAttr || coTeachers.length > 0) {
               jointAndSplitCount += 1;
             }
 
@@ -926,42 +1057,34 @@ export function computeTeachersLoadReport(
               ? [cls.name, ...(slot.jointWithClasses || [])].join(',')
               : cls.name;
 
-            const assistantName =
-              slot.assistantTeacher || cls.defaultAssistant || undefined;
-
-            const groupLabel =
-              slot.groupName ||
-              (matchAssistant
-                ? `Assistant(e) avec ${slot.teacher}`
-                : assistantName
-                ? `Classe complète (+ Ass. ${assistantName})`
-                : hasJointAttr
-                ? [cls.name, ...(slot.jointWithClasses || [])]
-                    .map(() => 'Classe complète')
-                    .join(',')
-                : isCoOrSplit
-                ? 'Classe complète (Co-ens.)'
-                : 'Classe complète');
-
-            const liKey = `SINGLE__${classesLabel}__${subj}__${groupLabel}`;
+            // IMPORTANT: Key by (classesLabel + subject) ONLY, so solo sessions and shared sessions
+            // of the same teacher in the same class & subject are ALWAYS counted together!
+            const liKey = `UNIFIED__${classesLabel.toLowerCase()}__${subj.toLowerCase()}`;
             if (!lineItemsMap.has(liKey)) {
               lineItemsMap.set(liKey, {
                 classesLabel,
                 classIds: [cls.id],
-                groupLabel,
+                groupLabel: slot.groupName || 'Classe complète',
                 subject: subj,
                 periods: 0,
                 isJointOrGrouped: Boolean(hasJointAttr),
+                coTeachersSet: new Set(),
+                sharedCount: 0,
               });
             }
-            lineItemsMap.get(liKey)!.periods += 1;
+            const li = lineItemsMap.get(liKey)!;
+            li.periods += 1;
+            if (coTeachers.length > 0) {
+              li.sharedCount += 1;
+              for (const ct of coTeachers) li.coTeachersSet.add(ct);
+            }
 
-            const bKey = `${cls.id}__${subj}`;
+            const bKey = `${cls.id}__${subj.toLowerCase()}`;
             if (!breakdownMap.has(bKey)) {
               breakdownMap.set(bKey, {
                 classId: cls.id,
                 className: classesLabel,
-                groupLabel,
+                groupLabel: 'Classe complète',
                 subject: subj,
                 periods: 0,
               });
@@ -972,33 +1095,57 @@ export function computeTeachersLoadReport(
       }
 
       let primaryCat: Exclude<SchoolCategory, 'ALL'> =
-        t.category || 'KG_Primary';
-      if (!t.category && catsCount.size > 0) {
-        primaryCat = Array.from(catsCount.entries()).sort(
+        t.category || 'KG_Maternelle';
+      if (deptsCount.size > 0) {
+        primaryCat = Array.from(deptsCount.entries()).sort(
           (a, b) => b[1] - a[1]
         )[0][0];
       }
 
+      // Build human-readable classification label showing Department(s) + Section(s)
+      const deptLabelsList = Array.from(deptsCount.keys()).map(
+        (d) => CATEGORY_SHORT_LABELS[d]
+      );
+      const currLabelsList = Array.from(sectionsSet).map((s) =>
+        getCurriculumShortLabel(s)
+      );
+      const richSectionLabel =
+        deptLabelsList.length > 0
+          ? `${deptLabelsList.join(' + ')} · Sect. ${currLabelsList.join('/')}`
+          : CATEGORY_SHORT_LABELS[primaryCat];
+
       const lineItems: TeacherLoadLineItem[] = Array.from(
         lineItemsMap.entries()
       )
-        .map(([key, item]) => ({
-          id: key,
-          ...item,
-        }))
-        .sort((a, b) => {
-          if (a.isJointOrGrouped !== b.isJointOrGrouped) {
-            return a.isJointOrGrouped ? -1 : 1;
+        .map(([key, item]) => {
+          const coList = Array.from(item.coTeachersSet);
+          let finalGroupLabel = item.groupLabel;
+          if (coList.length > 0) {
+            if (item.sharedCount === item.periods) {
+              finalGroupLabel = `Séance partagée avec ${coList.join(', ')}`;
+            } else {
+              finalGroupLabel = `Classe complète (incl. ${item.sharedCount}p partagée(s) avec ${coList.join(', ')})`;
+            }
           }
-          return b.periods - a.periods;
-        });
+          return {
+            id: key,
+            classesLabel: item.classesLabel,
+            classIds: item.classIds,
+            groupLabel: finalGroupLabel,
+            subject: item.subject,
+            periods: item.periods,
+            isJointOrGrouped: item.isJointOrGrouped || coList.length > 0,
+            assistantTeacher: coList.length > 0 ? coList.join(', ') : undefined,
+          };
+        })
+        .sort((a, b) => b.periods - a.periods);
 
       const maxPeriods = t.maxPeriodsPerWeek || 24;
       return {
         teacherId: t.id,
         teacherName: t.name,
         category: primaryCat,
-        sectionLabel: CATEGORY_SHORT_LABELS[primaryCat],
+        sectionLabel: richSectionLabel,
         subjects: t.subjects,
         totalPeriods,
         maxPeriods,
@@ -1156,12 +1303,15 @@ export function computeClassesLoadReport(
         }))
         .sort((a, b) => b.periods - a.periods);
 
+      const officialDept = getClassOfficialDepartment(cls);
+      const currSec = getClassCurriculumSection(cls);
+
       return {
         classId: cls.id,
         className: cls.name,
         section: cls.section,
-        category: cat,
-        categoryLabel: CATEGORY_SHORT_LABELS[cat],
+        category: officialDept,
+        categoryLabel: `${CATEGORY_SHORT_LABELS[officialDept]} · Sect. ${getCurriculumShortLabel(currSec)}`,
         defaultAssistant: cls.defaultAssistant,
         room: cls.room,
         totalPeriods,
@@ -1261,7 +1411,9 @@ export function computeSubjectsLoadReport(
           });
         }
         const entry = subjMap.get(sKey)!;
-        if (tRaw) entry.teachers.add(tRaw.trim());
+        for (const indivT of splitSlotTeachers(tRaw)) {
+          entry.teachers.add(indivT);
+        }
 
         if (!entry.byClass.has(cls.id)) {
           const defaultTarget =
@@ -1283,7 +1435,9 @@ export function computeSubjectsLoadReport(
         if (clsAlloc.targetPeriods === 0) {
           clsAlloc.targetPeriods = clsAlloc.scheduledPeriods;
         }
-        if (tRaw) clsAlloc.teachers.add(tRaw.trim());
+        for (const indivT of splitSlotTeachers(tRaw)) {
+          clsAlloc.teachers.add(indivT);
+        }
       };
 
       register(slot.subject, slot.teacher);

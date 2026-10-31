@@ -10,12 +10,18 @@ export type SectionType =
 export type SchoolCategory =
   | 'ALL'
   | 'KG_Maternelle'
+  | 'Primaire_Francais'
+  | 'Primaire_British_Filles'
+  | 'Primaire_British_Garcons'
+  | 'Secondaire_Filles'
+  | 'Secondaire_Garcons'
+  | 'French_Section'
+  | 'British_Section'
+  | 'American_Section'
   | 'Primaire'
   | 'Secondaire'
   | 'Boys_Section'
   | 'Girls_Section'
-  | 'French_Section'
-  | 'American_Section'
   | 'KG_Primary';
 
 export interface BellRow {

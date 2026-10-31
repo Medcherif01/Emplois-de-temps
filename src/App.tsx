@@ -66,8 +66,11 @@ import {
   DEFAULT_CLASSES,
   DEFAULT_TEACHERS,
   detectScheduleConflicts,
+  normalizeIndividualTeachersList,
   SCHOOL_INFO,
   SECTION_LABELS,
+  splitSlotTeachers,
+  teacherMatchesSlot,
 } from './data/alkawtharDefaults';
 import {
   BellScheduleGroup,
@@ -102,10 +105,12 @@ import {
   computeClassesLoadReport,
   computeSubjectsLoadReport,
   computeTeachersLoadReport,
+  CURRICULUM_SECTION_CATEGORIES,
   DEFAULT_BELL_SCHEDULE_GROUPS,
   detectIntercalatedSessions,
   generatePrintableEnsembleHtml,
   generatePrintableLoadReportHtml,
+  OFFICIAL_DEPARTMENT_CATEGORIES,
   TeacherLoadLineItem,
   teacherMatchesCategory,
 } from './utils/timetableAnalytics';
@@ -547,7 +552,7 @@ export default function App() {
           });
           const byId = new Map(loaded.map((t) => [t.id, t]));
           const merged = DEFAULT_TEACHERS.map((def) => byId.get(def.id) || def);
-          setTeachers(merged);
+          setTeachers(normalizeIndividualTeachersList(merged, classes));
         }
       },
       (err) => {
@@ -719,9 +724,98 @@ export default function App() {
     }
   };
 
+  const replaceTeacherNameInSlotStr = (
+    rawStr: string | undefined,
+    oldName: string,
+    newName: string
+  ): string | undefined => {
+    if (!rawStr) return rawStr;
+    const oldNorm = oldName.trim().toLowerCase();
+    if (rawStr.trim().toLowerCase() === oldNorm) return newName.trim();
+    const parts = splitSlotTeachers(rawStr);
+    if (!parts.some((p) => p.toLowerCase() === oldNorm)) return rawStr;
+    return parts
+      .map((p) => (p.toLowerCase() === oldNorm ? newName.trim() : p))
+      .join(' / ');
+  };
+
+  const propagateTeacherRenameAcrossSchedule = (
+    oldName: string,
+    newName: string
+  ) => {
+    const cleanOld = oldName.trim();
+    const cleanNew = newName.trim();
+    if (!cleanOld || !cleanNew || cleanOld.toLowerCase() === cleanNew.toLowerCase()) {
+      return;
+    }
+
+    const nextClasses = classes.map((cls) => {
+      let mutated = false;
+      const nextSlots: Record<string, LessonSlot> = {};
+      for (const [k, s] of Object.entries(cls.slots)) {
+        const nextT = replaceTeacherNameInSlotStr(s.teacher, cleanOld, cleanNew) || s.teacher;
+        const nextSubT = replaceTeacherNameInSlotStr(s.subTeacher, cleanOld, cleanNew);
+        const nextAssT = replaceTeacherNameInSlotStr(s.assistantTeacher, cleanOld, cleanNew);
+        if (
+          nextT !== s.teacher ||
+          nextSubT !== s.subTeacher ||
+          nextAssT !== s.assistantTeacher
+        ) {
+          mutated = true;
+          nextSlots[k] = {
+            ...s,
+            teacher: nextT,
+            subTeacher: nextSubT,
+            assistantTeacher: nextAssT,
+          };
+        } else {
+          nextSlots[k] = s;
+        }
+      }
+      const nextDefAss = replaceTeacherNameInSlotStr(
+        cls.defaultAssistant,
+        cleanOld,
+        cleanNew
+      );
+      if (nextDefAss !== cls.defaultAssistant) mutated = true;
+      if (!mutated) return cls;
+      return {
+        ...cls,
+        defaultAssistant: nextDefAss,
+        slots: nextSlots,
+      };
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+
+    setUnplacedLessons((prev) =>
+      prev.map((u) => ({
+        ...u,
+        teacher: replaceTeacherNameInSlotStr(u.teacher, cleanOld, cleanNew) || u.teacher,
+        subTeacher: replaceTeacherNameInSlotStr(u.subTeacher, cleanOld, cleanNew),
+        assistantTeacher: replaceTeacherNameInSlotStr(
+          u.assistantTeacher,
+          cleanOld,
+          cleanNew
+        ),
+      }))
+    );
+  };
+
   const saveTeacherToStore = async (updatedTeacher: TeacherProfile) => {
+    const existing = teachers.find((t) => t.id === updatedTeacher.id);
+    if (
+      existing &&
+      existing.name.trim().toLowerCase() !== updatedTeacher.name.trim().toLowerCase()
+    ) {
+      propagateTeacherRenameAcrossSchedule(existing.name, updatedTeacher.name);
+    }
+
     setTeachers((prev) =>
-      prev.map((t) => (t.id === updatedTeacher.id ? updatedTeacher : t))
+      normalizeIndividualTeachersList(
+        prev.map((t) => (t.id === updatedTeacher.id ? updatedTeacher : t)),
+        classes
+      )
     );
 
     if (user) {
@@ -749,6 +843,166 @@ export default function App() {
         );
       }
     }
+  };
+
+  // Direct handler to rename or modify any Teacher from Load Teachers or Directory
+  const handleRenameOrModifyTeacher = async (params: {
+    teacherId?: string;
+    oldName: string;
+    newName: string;
+    category?: Exclude<SchoolCategory, 'ALL'>;
+    maxPeriodsPerWeek?: number;
+    subjects?: string[];
+  }) => {
+    const cleanOld = params.oldName.trim();
+    const cleanNew = params.newName.trim() || cleanOld;
+    const target =
+      teachers.find((t) => t.id === params.teacherId) ||
+      teachers.find((t) => t.name.trim().toLowerCase() === cleanOld.toLowerCase());
+
+    if (cleanOld.toLowerCase() !== cleanNew.toLowerCase()) {
+      propagateTeacherRenameAcrossSchedule(cleanOld, cleanNew);
+    }
+
+    if (target) {
+      const updated: TeacherProfile = {
+        ...target,
+        name: cleanNew,
+        category: params.category || target.category,
+        section: params.category
+          ? CATEGORY_SHORT_LABELS[params.category]
+          : target.section,
+        maxPeriodsPerWeek:
+          params.maxPeriodsPerWeek !== undefined
+            ? params.maxPeriodsPerWeek
+            : target.maxPeriodsPerWeek,
+        subjects:
+          params.subjects && params.subjects.length > 0
+            ? params.subjects
+            : target.subjects,
+      };
+      setTeachers((prev) =>
+        normalizeIndividualTeachersList(
+          prev.map((t) => (t.id === target.id ? updated : t)),
+          classes
+        )
+      );
+    }
+
+    appendAuditLog(
+      `Modification Enseignant (${cleanOld} → ${cleanNew})`,
+      `Département/Section : ${
+        params.category ? CATEGORY_SHORT_LABELS[params.category] : 'Conservé'
+      } · Max : ${params.maxPeriodsPerWeek || 24}p/sem.`
+    );
+    await triggerRealtimeNotification(
+      `Enseignant mis à jour : ${cleanNew}`,
+      `Le profil et toutes les séances de ${cleanNew} ont été mis à jour.`,
+      'teacher_assigned',
+      cleanNew
+    );
+  };
+
+  // Direct handler to rename or modify any Class from Load Classes or Vue d'Ensemble
+  const handleRenameOrModifyClass = async (params: {
+    classId: string;
+    newName: string;
+    newRoom?: string;
+    newCategory?: Exclude<SchoolCategory, 'ALL'>;
+    newSection?: SectionType;
+    newDefaultAssistant?: string;
+  }) => {
+    const targetCls = classes.find((c) => c.id === params.classId);
+    if (!targetCls) return;
+
+    const oldName = targetCls.name.trim();
+    const cleanNewName = params.newName.trim() || oldName;
+
+    // Map official department category to appropriate bell-schedule SectionType if not explicitly given
+    let inferredSection: SectionType = params.newSection || targetCls.section;
+    if (!params.newSection && params.newCategory) {
+      if (params.newCategory === 'KG_Maternelle') {
+        inferredSection =
+          cleanNewName.toLowerCase().includes('kg3') ||
+          cleanNewName.toLowerCase().includes('gs')
+            ? 'KG3_GS'
+            : 'KG';
+      } else if (params.newCategory === 'Secondaire_Filles') {
+        inferredSection = 'Secondary_Girls';
+      } else if (params.newCategory === 'Secondaire_Garcons') {
+        inferredSection = 'Secondary_Boys';
+      } else if (
+        params.newCategory === 'Primaire_Francais' ||
+        params.newCategory === 'Primaire_British_Filles' ||
+        params.newCategory === 'Primaire_British_Garcons'
+      ) {
+        inferredSection = 'Primary';
+      }
+    }
+
+    const nextClasses = classes.map((cls) => {
+      if (cls.id === targetCls.id) {
+        return {
+          ...cls,
+          name: cleanNewName,
+          room: params.newRoom !== undefined ? params.newRoom.trim() || cls.room : cls.room,
+          category: params.newCategory || cls.category,
+          section: inferredSection,
+          defaultAssistant:
+            params.newDefaultAssistant !== undefined
+              ? params.newDefaultAssistant.trim() || undefined
+              : cls.defaultAssistant,
+        };
+      }
+      // If class name changed, also update jointWithClasses references in other classes
+      if (oldName.toLowerCase() !== cleanNewName.toLowerCase()) {
+        let slotMutated = false;
+        const nextSlots: Record<string, LessonSlot> = {};
+        for (const [k, s] of Object.entries(cls.slots)) {
+          if (
+            s.jointWithClasses &&
+            s.jointWithClasses.some((jn) => jn.trim().toLowerCase() === oldName.toLowerCase())
+          ) {
+            slotMutated = true;
+            nextSlots[k] = {
+              ...s,
+              jointWithClasses: s.jointWithClasses.map((jn) =>
+                jn.trim().toLowerCase() === oldName.toLowerCase() ? cleanNewName : jn
+              ),
+            };
+          } else {
+            nextSlots[k] = s;
+          }
+        }
+        if (slotMutated) {
+          return { ...cls, slots: nextSlots };
+        }
+      }
+      return cls;
+    });
+
+    recordHistoryAndSetClasses(nextClasses);
+
+    if (oldName.toLowerCase() !== cleanNewName.toLowerCase()) {
+      setUnplacedLessons((prev) =>
+        prev.map((u) =>
+          u.classId === targetCls.id ? { ...u, className: cleanNewName } : u
+        )
+      );
+    }
+
+    appendAuditLog(
+      `Modification Classe (${oldName} → ${cleanNewName})`,
+      `Département : ${
+        params.newCategory ? CATEGORY_SHORT_LABELS[params.newCategory] : targetCls.section
+      } · Salle : ${params.newRoom || targetCls.room}`
+    );
+    await triggerRealtimeNotification(
+      `Classe mise à jour : ${cleanNewName}`,
+      `Le nom, le département et la salle de la classe ${cleanNewName} ont été enregistrés.`,
+      'schedule_updated',
+      'all'
+    );
   };
 
   const handleApplyAllDefaultTimetables = async () => {
@@ -1314,13 +1568,19 @@ export default function App() {
     if (!cleanName) return;
 
     const sectionMap: Record<Exclude<SchoolCategory, 'ALL'>, string> = {
-      KG_Maternelle: 'Maternelle (KG)',
+      KG_Maternelle: 'KG & Maternelle',
+      Primaire_Francais: 'Primaire Français (PP1–PEI1)',
+      Primaire_British_Filles: '1–6 British Filles',
+      Primaire_British_Garcons: '1–6 British Garçons',
+      Secondaire_Filles: 'Secondaire Filles',
+      Secondaire_Garcons: 'Secondaire Garçons',
+      French_Section: 'Section Française',
+      British_Section: 'Section British',
+      American_Section: 'Section Américaine',
       Primaire: 'Primaire',
       Secondaire: 'Secondaire',
-      French_Section: 'Section Française',
       Boys_Section: 'Boys Section',
       Girls_Section: 'Girls Section',
-      American_Section: 'American Section',
       KG_Primary: 'KG & Primary',
     };
 
@@ -1841,8 +2101,9 @@ export default function App() {
       if (wasInOld && !isInNew) {
         for (const [k, slot] of Object.entries(nextSlots)) {
           if (
-            slot.teacher.trim().toLowerCase() ===
-              params.teacherName.trim().toLowerCase() &&
+            (teacherMatchesSlot(params.teacherName, slot.teacher) ||
+              teacherMatchesSlot(params.teacherName, slot.subTeacher) ||
+              teacherMatchesSlot(params.teacherName, slot.assistantTeacher)) &&
             slot.subject.trim().toLowerCase() ===
               params.oldItem.subject.trim().toLowerCase()
           ) {
@@ -1856,8 +2117,9 @@ export default function App() {
       const matchingKeys = Object.entries(nextSlots)
         .filter(
           ([, slot]) =>
-            slot.teacher.trim().toLowerCase() ===
-              params.teacherName.trim().toLowerCase() &&
+            (teacherMatchesSlot(params.teacherName, slot.teacher) ||
+              teacherMatchesSlot(params.teacherName, slot.subTeacher) ||
+              teacherMatchesSlot(params.teacherName, slot.assistantTeacher)) &&
             slot.subject.trim().toLowerCase() ===
               params.oldItem.subject.trim().toLowerCase()
         )
@@ -1867,11 +2129,10 @@ export default function App() {
         nextSlots[k] = {
           ...nextSlots[k],
           subject: params.newSubject.trim(),
-          teacher: params.teacherName,
           groupName: params.newGroupLabel,
           jointWithClasses: jointNames
             ? jointNames.filter((n) => n !== cls.name)
-            : undefined,
+            : nextSlots[k].jointWithClasses,
         };
       }
 
@@ -3919,6 +4180,7 @@ export default function App() {
                 }}
                 onPrintEnsemble={handlePrintEnsembleMatrix}
                 onExportExcelEnsemble={handleExportExcelEnsemble}
+                onRenameOrModifyClass={handleRenameOrModifyClass}
                 darkMode={darkMode}
               />
             )}
@@ -3938,6 +4200,8 @@ export default function App() {
                 onUpdateSubjectClassLoad={handleUpdateSubjectClassLoad}
                 onModifyClassLoadItem={handleModifyClassLoadItem}
                 onModifyTeacherLoadLine={handleModifyTeacherLoadLine}
+                onRenameOrModifyTeacher={handleRenameOrModifyTeacher}
+                onRenameOrModifyClass={handleRenameOrModifyClass}
                 onCloneClassLoadToClasses={handleCloneClassLoadToClasses}
                 onGlobalReplaceTeacherOrSubject={
                   handleGlobalReplaceTeacherOrSubject
@@ -4049,27 +4313,24 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Category Filter Pills (French Section, Boys Section, Girls Section...) */}
-                  <div className="mb-3">
-                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1">
-                      Catégorie (French / Boys / Girls)
+                  {/* Category Filter Pills (6 Official Departments + 3 Curriculum Sections) */}
+                  <div className="mb-3 space-y-1.5">
+                    <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      6 Départements & 3 Sections (Fr / Brit / Am)
                     </label>
                     <div className="flex flex-wrap gap-1">
                       {(
                         [
                           'ALL',
-                          'French_Section',
-                          'Boys_Section',
-                          'Girls_Section',
-                          'American_Section',
-                          'KG_Primary',
+                          ...OFFICIAL_DEPARTMENT_CATEGORIES,
+                          ...CURRICULUM_SECTION_CATEGORIES,
                         ] as SchoolCategory[]
                       ).map((cat) => (
                         <button
                           key={cat}
                           type="button"
                           onClick={() => setSelectedCategory(cat)}
-                          className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${
+                          className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors cursor-pointer ${
                             selectedCategory === cat
                               ? 'bg-slate-900 text-white'
                               : 'bg-slate-100 text-slate-600 hover:text-slate-900'
@@ -4466,6 +4727,8 @@ export default function App() {
                 onUpdateSubjectClassLoad={handleUpdateSubjectClassLoad}
                 onModifyClassLoadItem={handleModifyClassLoadItem}
                 onModifyTeacherLoadLine={handleModifyTeacherLoadLine}
+                onRenameOrModifyTeacher={handleRenameOrModifyTeacher}
+                onRenameOrModifyClass={handleRenameOrModifyClass}
                 onCloneClassLoadToClasses={handleCloneClassLoadToClasses}
                 onGlobalReplaceTeacherOrSubject={
                   handleGlobalReplaceTeacherOrSubject
@@ -4549,18 +4812,15 @@ export default function App() {
                       {(
                         [
                           'ALL',
-                          'French_Section',
-                          'Boys_Section',
-                          'Girls_Section',
-                          'American_Section',
-                          'KG_Primary',
+                          ...OFFICIAL_DEPARTMENT_CATEGORIES,
+                          ...CURRICULUM_SECTION_CATEGORIES,
                         ] as SchoolCategory[]
                       ).map((cat) => (
                         <button
                           key={cat}
                           type="button"
                           onClick={() => setSelectedCategory(cat)}
-                          className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors ${
+                          className={`px-2 py-0.5 text-[10px] font-semibold rounded transition-colors cursor-pointer ${
                             selectedCategory === cat
                               ? 'bg-slate-900 text-white'
                               : 'bg-slate-100 text-slate-600 hover:text-slate-900'

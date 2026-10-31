@@ -3480,45 +3480,80 @@ export function slugifyTeacherId(name: string): string {
   );
 }
 
+/**
+ * Splits a potentially shared teacher string (e.g. "Fatimah / Nour / Quodsiya" or "Rawaa & Aya")
+ * into individual teacher names so that every teacher is listed and counted individually.
+ */
+export function splitSlotTeachers(slotTeacher?: string): string[] {
+  if (!slotTeacher) return [];
+  return slotTeacher
+    .split(/[\/&+]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 export function extractDefaultTeachers(classes: SchoolClass[]): TeacherProfile[] {
   const map = new Map<
     string,
-    { subjects: Set<string>; sections: Set<string>; count: number }
+    {
+      displayName: string;
+      subjects: Set<string>;
+      sections: Set<string>;
+      seenDayPeriods: Set<string>;
+      count: number;
+    }
   >();
 
   for (const cls of classes) {
-    for (const slot of Object.values(cls.slots)) {
-      const addEntry = (teacherName: string, subjectName: string) => {
-        const cleanName = teacherName.trim();
-        if (!cleanName) return;
-        if (!map.has(cleanName)) {
-          map.set(cleanName, {
-            subjects: new Set(),
-            sections: new Set(),
-            count: 0,
-          });
+    for (const [slotKey, slot] of Object.entries(cls.slots)) {
+      const addEntry = (rawTeacherField: string | undefined, subjectName: string) => {
+        for (const individualName of splitSlotTeachers(rawTeacherField)) {
+          const normKey = individualName.toLowerCase();
+          if (!map.has(normKey)) {
+            map.set(normKey, {
+              displayName: individualName,
+              subjects: new Set(),
+              sections: new Set(),
+              seenDayPeriods: new Set(),
+              count: 0,
+            });
+          }
+          const entry = map.get(normKey)!;
+          if (subjectName && subjectName.trim()) {
+            entry.subjects.add(subjectName.trim());
+          }
+          entry.sections.add(cls.section);
+          // Count each period once if it's a simultaneous joint class session
+          const isJoint = Boolean(slot.jointWithClasses && slot.jointWithClasses.length > 0);
+          if (isJoint) {
+            if (!entry.seenDayPeriods.has(slotKey)) {
+              entry.seenDayPeriods.add(slotKey);
+              entry.count += 1;
+            }
+          } else {
+            entry.count += 1;
+          }
         }
-        const entry = map.get(cleanName)!;
-        entry.subjects.add(subjectName.trim());
-        entry.sections.add(cls.section);
-        entry.count += 1;
       };
 
       addEntry(slot.teacher, slot.subject);
-      if (slot.subTeacher && slot.subSubject) {
-        addEntry(slot.subTeacher, slot.subSubject);
+      if (slot.subTeacher) {
+        addEntry(slot.subTeacher, slot.subSubject || slot.subject);
+      }
+      if (slot.assistantTeacher) {
+        addEntry(slot.assistantTeacher, slot.subject);
       }
     }
   }
 
-  return Array.from(map.entries())
-    .sort((a, b) => a[0].localeCompare(b[0]))
-    .map(([name, info]) => ({
-      id: slugifyTeacherId(name),
-      name,
+  return Array.from(map.values())
+    .sort((a, b) => a.displayName.localeCompare(b.displayName))
+    .map((info) => ({
+      id: slugifyTeacherId(info.displayName),
+      name: info.displayName,
       subjects: Array.from(info.subjects).slice(0, 10),
       section: Array.from(info.sections).join(', ').slice(0, 80) || 'Primary',
-      maxPeriodsPerWeek: Math.min(40, Math.max(24, info.count + 4)),
+      maxPeriodsPerWeek: Math.min(40, Math.max(24, info.count + 2)),
       unavailableSlots: [],
       defaultAssigned: true,
       visibility: 'school',
@@ -3526,10 +3561,74 @@ export function extractDefaultTeachers(classes: SchoolClass[]): TeacherProfile[]
     }));
 }
 
+/**
+ * Ensures any list of teachers (e.g. loaded from Firestore or state) contains ONLY
+ * individual teachers ("chaque enseignant seul") and never combined strings like "A / B" or "A & B".
+ */
+export function normalizeIndividualTeachersList(
+  teachers: TeacherProfile[],
+  classes: SchoolClass[]
+): TeacherProfile[] {
+  const byNorm = new Map<string, TeacherProfile>();
+
+  const registerIndividual = (t: TeacherProfile, individualName: string) => {
+    const clean = individualName.trim();
+    if (!clean) return;
+    const norm = clean.toLowerCase();
+    if (!byNorm.has(norm)) {
+      byNorm.set(norm, {
+        ...t,
+        id: /[\/&+]/.test(t.name) ? slugifyTeacherId(clean) : t.id,
+        name: clean,
+        subjects: [...t.subjects],
+      });
+    } else {
+      const existing = byNorm.get(norm)!;
+      existing.subjects = Array.from(
+        new Set([...existing.subjects, ...t.subjects])
+      ).slice(0, 10);
+      existing.unavailableSlots = Array.from(
+        new Set([...existing.unavailableSlots, ...(t.unavailableSlots || [])])
+      );
+      if (t.category && !existing.category) {
+        existing.category = t.category;
+      }
+    }
+  };
+
+  for (const t of teachers) {
+    const parts = splitSlotTeachers(t.name);
+    if (parts.length <= 1) {
+      registerIndividual(t, t.name);
+    } else {
+      for (const p of parts) {
+        registerIndividual(t, p);
+      }
+    }
+  }
+
+  // Also ensure any individual teacher present in classes is included
+  for (const extracted of extractDefaultTeachers(classes)) {
+    const norm = extracted.name.toLowerCase();
+    if (!byNorm.has(norm)) {
+      byNorm.set(norm, extracted);
+    } else {
+      const existing = byNorm.get(norm)!;
+      existing.subjects = Array.from(
+        new Set([...existing.subjects, ...extracted.subjects])
+      ).slice(0, 10);
+    }
+  }
+
+  return Array.from(byNorm.values()).sort((a, b) =>
+    a.name.localeCompare(b.name)
+  );
+}
+
 export const DEFAULT_TEACHERS: TeacherProfile[] =
   extractDefaultTeachers(DEFAULT_CLASSES);
 
-export function teacherMatchesSlot(teacherName: string, slotTeacher: string): boolean {
+export function teacherMatchesSlot(teacherName: string, slotTeacher?: string): boolean {
   if (!teacherName || !slotTeacher) return false;
   if (slotTeacher.trim().toLowerCase() === teacherName.trim().toLowerCase()) {
     return true;
@@ -3558,20 +3657,44 @@ export function buildTeacherTimetable(
       const matchPrimary = teacherMatchesSlot(teacherName, slot.teacher);
       const matchSub =
         slot.subTeacher && teacherMatchesSlot(teacherName, slot.subTeacher);
+      const matchAssistant =
+        slot.assistantTeacher &&
+        teacherMatchesSlot(teacherName, slot.assistantTeacher);
 
-      if (matchPrimary || matchSub) {
+      if (matchPrimary || matchSub || matchAssistant) {
         totalPeriods += 1;
         classesSet.add(cls.name);
-        const subj = matchPrimary ? slot.subject : slot.subSubject || slot.subject;
+        const subj = matchPrimary
+          ? slot.subject
+          : matchSub
+          ? slot.subSubject || slot.subject
+          : slot.subject;
+
+        // Identify co-teachers if this is a shared session
+        const allParticipants = [
+          ...splitSlotTeachers(slot.teacher),
+          ...splitSlotTeachers(slot.subTeacher),
+          ...splitSlotTeachers(slot.assistantTeacher),
+        ];
+        const coTeachers = allParticipants.filter(
+          (p) => p.toLowerCase() !== teacherName.trim().toLowerCase()
+        );
+        const classLabelWithShared = slot.jointWithClasses?.length
+          ? `${cls.name} + ${slot.jointWithClasses.join(' + ')}`
+          : coTeachers.length > 0
+          ? `${cls.name} (avec ${coTeachers.join(', ')})`
+          : cls.name;
+
         if (!slots[key]) {
           slots[key] = {
             subject: subj,
-            teacher: slot.jointWithClasses?.length
-              ? `${cls.name} + ${slot.jointWithClasses.join(' + ')}`
-              : cls.name,
+            teacher: classLabelWithShared,
             room: slot.room || cls.room,
             jointWithClasses: slot.jointWithClasses,
-            isIntercalated: slot.isIntercalated || Boolean(slot.subSubject && slot.subTeacher),
+            isIntercalated:
+              slot.isIntercalated ||
+              Boolean(slot.subSubject && slot.subTeacher) ||
+              coTeachers.length > 0,
           };
         } else {
           // If it's an intentional joint class, merge class names cleanly without counting twice in display
@@ -3638,48 +3761,48 @@ export function detectScheduleConflicts(
       const period = Number(periodStr);
 
       const checkTeacher = (tName?: string) => {
-        if (!tName) return;
-        const clean = tName.trim();
-        if (!clean) return;
-        const occKey = `${clean.toLowerCase()}__${key}`;
-        if (!occupancy.has(occKey)) {
-          occupancy.set(occKey, {
-            teacher: clean,
-            day,
-            period,
-            classes: [],
-            jointPairs: new Set(),
-          });
-        }
-        const entry = occupancy.get(occKey)!;
-        entry.classes.push(cls.name);
-        if (slot.jointWithClasses?.length) {
-          for (const jc of slot.jointWithClasses) {
-            const pairKey = [cls.name.toLowerCase(), jc.toLowerCase()]
-              .sort()
-              .join('::');
-            entry.jointPairs.add(pairKey);
+        for (const clean of splitSlotTeachers(tName)) {
+          const occKey = `${clean.toLowerCase()}__${key}`;
+          if (!occupancy.has(occKey)) {
+            occupancy.set(occKey, {
+              teacher: clean,
+              day,
+              period,
+              classes: [],
+              jointPairs: new Set(),
+            });
           }
-        }
+          const entry = occupancy.get(occKey)!;
+          entry.classes.push(cls.name);
+          if (slot.jointWithClasses?.length) {
+            for (const jc of slot.jointWithClasses) {
+              const pairKey = [cls.name.toLowerCase(), jc.toLowerCase()]
+                .sort()
+                .join('::');
+              entry.jointPairs.add(pairKey);
+            }
+          }
 
-        // Check teacher unavailability
-        const profile = teacherByName.get(clean.toLowerCase());
-        if (profile && profile.unavailableSlots.includes(key)) {
-          conflicts.push({
-            id: `unavail_${profile.id}_${cls.id}_${key}`,
-            type: 'unavailable_slot',
-            severity: 'critical',
-            teacher: clean,
-            day,
-            period,
-            classesInvolved: [cls.name],
-            description: `${clean} est marqué(e) indisponible le ${day} (Période ${period}) mais enseigne en ${cls.name}.`,
-          });
+          // Check teacher unavailability
+          const profile = teacherByName.get(clean.toLowerCase());
+          if (profile && profile.unavailableSlots.includes(key)) {
+            conflicts.push({
+              id: `unavail_${profile.id}_${cls.id}_${key}`,
+              type: 'unavailable_slot',
+              severity: 'critical',
+              teacher: clean,
+              day,
+              period,
+              classesInvolved: [cls.name],
+              description: `${clean} est marqué(e) indisponible le ${day} (Période ${period}) mais enseigne en ${cls.name}.`,
+            });
+          }
         }
       };
 
       checkTeacher(slot.teacher);
       if (slot.subTeacher) checkTeacher(slot.subTeacher);
+      if (slot.assistantTeacher) checkTeacher(slot.assistantTeacher);
     }
   }
 

@@ -26,10 +26,12 @@ import {
 import {
   CATEGORY_LABELS,
   CATEGORY_SHORT_LABELS,
+  CURRICULUM_SECTION_CATEGORIES,
   getSubjectVisualStyle,
+  OFFICIAL_DEPARTMENT_CATEGORIES,
   teacherMatchesCategory,
 } from '../utils/timetableAnalytics';
-import { DAYS_OF_WEEK } from '../data/alkawtharDefaults';
+import { DAYS_OF_WEEK, teacherMatchesSlot } from '../data/alkawtharDefaults';
 import {
   SortGroupControlBar,
   SortDirection,
@@ -100,10 +102,9 @@ export const TeachersWorkloadDirectoryModal: React.FC<
           for (const [slotKey, slot] of Object.entries(cls.slots)) {
             if (!slot.subject) continue;
             const isMain =
-              slot.teacher && slot.teacher.toLowerCase().trim() === tLower;
-            const isAss =
-              slot.assistantTeacher &&
-              slot.assistantTeacher.toLowerCase().trim() === tLower;
+              teacherMatchesSlot(t.name, slot.teacher) ||
+              teacherMatchesSlot(t.name, slot.subTeacher);
+            const isAss = teacherMatchesSlot(t.name, slot.assistantTeacher);
 
             if (isMain || isAss) {
               totalSessionsCount++;
@@ -303,28 +304,24 @@ export const TeachersWorkloadDirectoryModal: React.FC<
 
         {/* Filter & Search Bar */}
         <div className="px-6 py-3 bg-slate-100 dark:bg-slate-800/60 border-b border-slate-200 dark:border-slate-700 flex flex-wrap items-center justify-between gap-3 shrink-0">
-          {/* Category Pills */}
+          {/* Category Pills: 6 Départements + 3 Sections */}
           <div className="flex flex-wrap items-center gap-1">
             <span className="text-[11px] font-bold text-slate-500 mr-1 flex items-center gap-1">
               <Filter className="w-3 h-3" />
-              <span>Section :</span>
+              <span>6 Dépts & 3 Sections :</span>
             </span>
             {(
               [
                 'ALL',
-                'French_Section',
-                'Primaire',
-                'Secondaire',
-                'KG_Maternelle',
-                'Boys_Section',
-                'Girls_Section',
+                ...OFFICIAL_DEPARTMENT_CATEGORIES,
+                ...CURRICULUM_SECTION_CATEGORIES,
               ] as SchoolCategory[]
             ).map((cat) => (
               <button
                 key={cat}
                 type="button"
                 onClick={() => onSelectCategory(cat)}
-                className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                className={`px-2 py-1 text-[11px] font-bold rounded-lg transition-all cursor-pointer ${
                   selectedCategory === cat
                     ? 'bg-teal-700 text-white shadow-xs'
                     : 'bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-200'

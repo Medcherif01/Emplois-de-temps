@@ -1,6 +1,7 @@
 import {
   BELL_SCHEDULES,
   DAYS_OF_WEEK,
+  normalizeIndividualTeachersList,
   teacherMatchesSlot,
 } from '../data/alkawtharDefaults';
 import {
@@ -172,29 +173,33 @@ export type DepartmentId =
   | 'Dept_Secondaire_Garcons';
 
 export const DEPARTMENT_LABELS: Record<DepartmentId, string> = {
-  Dept_KG_Maternelle: 'Maternelle (KG/PS/MS/GS)',
-  Dept_Primaire_Francophone: 'Primaire Francophone (PP1–PP5)',
-  Dept_Primaire_Filles: 'Primaire Filles (G1–G6 Girls)',
-  Dept_Primaire_Garcons: 'Primaire Garçons (G1–G6 Boys)',
-  Dept_Secondaire_Filles: 'Secondaire Filles (PEI/DP/G7–G12)',
-  Dept_Secondaire_Garcons: 'Secondaire Garçons (G7–G12 Boys / PEI Garçons)',
+  Dept_KG_Maternelle: 'KG & Maternelle (British KG / Fr PS-MS-GS)',
+  Dept_Primaire_Francophone: 'Primaire Français (PP1 à PEI1)',
+  Dept_Primaire_Filles: '1–6 British Filles (Girls)',
+  Dept_Primaire_Garcons: '1–6 British Garçons (Boys)',
+  Dept_Secondaire_Filles: 'Secondaire Filles (Fr / Brit / Am)',
+  Dept_Secondaire_Garcons: 'Secondaire Garçons (Fr / Brit / Am)',
 };
 
 export function getClassDepartment(cls: SchoolClass): DepartmentId {
-  const n = cls.name.toLowerCase();
-  if (cls.section === 'KG' || cls.section === 'KG3_GS') {
+  const n = cls.name.trim().toLowerCase();
+  if (
+    cls.category === 'KG_Maternelle' ||
+    cls.section === 'KG' ||
+    cls.section === 'KG3_GS'
+  ) {
     return 'Dept_KG_Maternelle';
   }
-  if (cls.section === 'Secondary_Boys') {
-    return 'Dept_Secondaire_Garcons';
-  }
-  if (cls.section === 'Secondary_Girls') {
-    return 'Dept_Secondaire_Filles';
-  }
-  if (n.startsWith('pp') || n === 'pei1') {
+  if (cls.category === 'Primaire_Francais' || n.startsWith('pp') || n.startsWith('pei1')) {
     return 'Dept_Primaire_Francophone';
   }
-  if (n.includes('boys') || n.includes('garçons')) {
+  if (cls.category === 'Secondaire_Garcons' || cls.section === 'Secondary_Boys') {
+    return 'Dept_Secondaire_Garcons';
+  }
+  if (cls.category === 'Secondaire_Filles' || cls.section === 'Secondary_Girls') {
+    return 'Dept_Secondaire_Filles';
+  }
+  if (cls.category === 'Primaire_British_Garcons' || n.includes('boys') || n.includes('garçons')) {
     return 'Dept_Primaire_Garcons';
   }
   return 'Dept_Primaire_Filles';
@@ -1545,7 +1550,7 @@ export function applyBoysSectionRestructuringOrder(
 
   return {
     classes: finalClasses,
-    teachers: nextTeachers,
+    teachers: normalizeIndividualTeachersList(nextTeachers, finalClasses),
     unplacedLessons: remainingUnplaced,
     summary:
       `Ordre structurel et multi-départements appliqué sans toucher aux ${preservedClasses.length} autres classes : ` +
@@ -1980,7 +1985,7 @@ export function executeUniversalIntelligentOrder(params: {
 
   return {
     classes: nextClasses,
-    teachers: nextTeachers,
+    teachers: normalizeIndividualTeachersList(nextTeachers, nextClasses),
     unplacedLessons: nextUnplaced,
     summary:
       aiAst.summary ||
