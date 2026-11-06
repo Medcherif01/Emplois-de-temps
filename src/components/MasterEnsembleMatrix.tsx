@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowLeftRight,
   ArrowRight,
@@ -8,20 +9,26 @@ import {
   ChevronDown,
   ChevronUp,
   Edit3,
+  Eye,
   FileSpreadsheet,
+  Filter,
   GitMerge,
   Inbox,
   Layers,
   Lock,
+  Maximize2,
+  Minimize2,
   PanelRightClose,
   PanelRightOpen,
   Plus,
   Printer,
   Search,
+  ShieldAlert,
   Sparkles,
   Trash2,
   Unlock,
   Wand2,
+  Wrench,
   X,
 } from 'lucide-react';
 import { DAYS_OF_WEEK } from '../data/alkawtharDefaults';
@@ -38,7 +45,10 @@ import {
 import {
   CATEGORY_SHORT_LABELS,
   classMatchesCategory,
+  ConflictOrContradictionKind,
   CURRICULUM_SECTION_CATEGORIES,
+  DetailedConflictItem,
+  detectAllConflictsAndContradictions,
   detectIntercalatedSessions,
   evaluateRowSwitchCompatibility,
   getClassCurriculumSection,
@@ -122,6 +132,7 @@ interface MasterEnsembleMatrixProps {
     newSection?: SectionType;
     newDefaultAssistant?: string;
   }) => void;
+  onAutoResolveConflicts?: (targetConflictId?: string) => void;
   darkMode?: boolean;
 }
 
@@ -189,12 +200,22 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
   onPrintEnsemble,
   onExportExcelEnsemble,
   onRenameOrModifyClass,
+  onAutoResolveConflicts,
   darkMode = false,
 }) => {
   const [selectedSource, setSelectedSource] = useState<{
     classId: string;
     slotKey: string;
   } | null>(null);
+
+  // Grid Size / Zoom & Fullscreen Mode for maximum clarity
+  const [gridDensity, setGridDensity] = useState<'compact' | 'comfort' | 'large'>('comfort');
+  const [isFullHeightGrid, setIsFullHeightGrid] = useState<boolean>(false);
+
+  // Conflict & Contradiction Center state
+  const [showConflictsPanel, setShowConflictsPanel] = useState<boolean>(true);
+  const [onlyShowConflictCells, setOnlyShowConflictCells] = useState<boolean>(false);
+  const [conflictKindFilter, setConflictKindFilter] = useState<ConflictOrContradictionKind | 'ALL'>('ALL');
 
   // Inline Class Rename / Modify state in Vue Ensemble
   const [editingClassMetaId, setEditingClassMetaId] = useState<string | null>(
@@ -217,8 +238,8 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
     | null
   >(null);
 
-  // Panels visibility
-  const [showAiGeneratorPanel, setShowAiGeneratorPanel] = useState<boolean>(true);
+  // Panels visibility (collapsed by default so Vue d'Ensemble is immediately clear and visible)
+  const [showAiGeneratorPanel, setShowAiGeneratorPanel] = useState<boolean>(false);
   const [showFreezeSelector, setShowFreezeSelector] = useState<boolean>(false);
   const [showSideTray, setShowSideTray] = useState<boolean>(true);
   const [sideTrayFilterClassId, setSideTrayFilterClassId] =
@@ -243,10 +264,47 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
 
   const frozenSet = useMemo(() => new Set(frozenClassIds), [frozenClassIds]);
 
-  const filteredClasses = useMemo(
-    () => classes.filter((c) => classMatchesCategory(c, selectedCategory)),
-    [classes, selectedCategory]
+  // Comprehensive Conflict & Contradiction Detection across all classes
+  const conflictAnalysis = useMemo(
+    () => detectAllConflictsAndContradictions(classes, teachers),
+    [classes, teachers]
   );
+
+  const filteredConflicts = useMemo(() => {
+    return conflictAnalysis.items.filter((item) => {
+      if (conflictKindFilter !== 'ALL' && item.kind !== conflictKindFilter) {
+        return false;
+      }
+      if (selectedCategory !== 'ALL' && item.classIds.length > 0) {
+        const matchesCat = item.classIds.some((cid) => {
+          const c = classes.find((cl) => cl.id === cid);
+          return c ? classMatchesCategory(c, selectedCategory) : false;
+        });
+        if (!matchesCat) return false;
+      }
+      return true;
+    });
+  }, [conflictAnalysis.items, conflictKindFilter, selectedCategory, classes]);
+
+  const criticalConflictsCount = useMemo(
+    () => conflictAnalysis.items.filter((i) => i.severity === 'critical').length,
+    [conflictAnalysis.items]
+  );
+
+  const warningContradictionsCount = useMemo(
+    () => conflictAnalysis.items.filter((i) => i.severity === 'warning').length,
+    [conflictAnalysis.items]
+  );
+
+  const filteredClasses = useMemo(() => {
+    return classes.filter((c) => {
+      if (!classMatchesCategory(c, selectedCategory)) return false;
+      if (onlyShowConflictCells) {
+        return (conflictAnalysis.classConflictCountMap.get(c.id) || 0) > 0;
+      }
+      return true;
+    });
+  }, [classes, selectedCategory, onlyShowConflictCells, conflictAnalysis.classConflictCountMap]);
 
   const intercalatedSessions = useMemo(
     () => detectIntercalatedSessions(classes),
@@ -278,6 +336,15 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
         : undefined,
     [activeSourceClass, selectedSource]
   );
+
+  const activeSourceConflicts = useMemo(() => {
+    if (!selectedSource) return [];
+    return (
+      conflictAnalysis.cellConflictMap.get(
+        `${selectedSource.classId}__${selectedSource.slotKey}`
+      ) || []
+    );
+  }, [selectedSource, conflictAnalysis.cellConflictMap]);
 
   const selectedSideCard = useMemo(
     () => unplacedLessons.find((c) => c.id === selectedSideCardId) || null,
@@ -405,11 +472,11 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
         (cand) =>
           cand.targetKey !== selectedSource.slotKey &&
           cand.status !== 'blocked' &&
-          Boolean(cand.targetSlot)
+          Boolean(cand.targetSlot || activeSourceConflicts.length > 0)
       )
       .sort((a, b) => b.scoreDelta - a.scoreDelta)
-      .slice(0, 4);
-  }, [rowCompatibilityMap, selectedSource]);
+      .slice(0, 5);
+  }, [rowCompatibilityMap, selectedSource, activeSourceConflicts.length]);
 
   const allDistinctSubjects = useMemo(() => {
     const set = new Set<string>();
@@ -432,7 +499,6 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
     return Array.from(set).sort();
   }, [teachers, classes]);
 
-  // Auto-suggest teacher when user picks class + subject in the "Ajouter à côté" mini form
   const handleSelectTraySubject = (subj: string) => {
     setNewTraySubject(subj);
     const targetCls = classes.find((c) => c.id === newTrayClassId);
@@ -475,7 +541,6 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
     // MODE 1: A card from "Matières à Côté" is currently selected for manual placement!
     if (selectedSideCard) {
       if (selectedSideCard.classId !== cls.id) {
-        // Switch selection to normal cell if user clicked a different class
         setSelectedSideCardId(null);
         setSelectedSource({ classId: cls.id, slotKey });
         return;
@@ -516,77 +581,130 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
     setHoveredCandidate(null);
   };
 
+  // Focus a conflict directly in the matrix
+  const handleFocusConflictInMatrix = (conflict: DetailedConflictItem) => {
+    if (conflict.cellKeys.length > 0) {
+      const targetCell = conflict.cellKeys[conflict.cellKeys.length - 1];
+      const [classId, slotKey] = targetCell.split('__');
+      setSelectedSideCardId(null);
+      setSelectedSource({ classId, slotKey });
+      // Ensure category filter doesn't hide this class
+      const cls = classes.find((c) => c.id === classId);
+      if (cls && !classMatchesCategory(cls, selectedCategory)) {
+        onSelectCategory('ALL');
+      }
+    } else if (conflict.teacher) {
+      setHighlightFilter(conflict.teacher);
+    }
+  };
+
+  const rowHeightClass =
+    gridDensity === 'large'
+      ? 'h-[66px]'
+      : gridDensity === 'comfort'
+      ? 'h-[54px]'
+      : 'h-[42px]';
+
+  const minTableWidthClass =
+    gridDensity === 'large'
+      ? 'min-w-[1680px]'
+      : gridDensity === 'comfort'
+      ? 'min-w-[1440px]'
+      : 'min-w-[1220px]';
+
   return (
     <div className="space-y-3 no-print">
       {/* =====================================================================
-          1. STUDIO IA SIMPLIFIÉ : GÉNÉRER SELON IDÉE / ORDRE + GARDER POSITIONS DE CERTAINES CLASSES
+          1. BARRE DE CONTRÔLE PRINCIPALE : FILTRES DÉPARTEMENTS + OPTIONS VISIBLES
          ===================================================================== */}
       <div
-        className={`border rounded-xl overflow-hidden shadow-xs transition-all ${
+        className={`border rounded-xl p-3.5 space-y-3 shadow-2xs ${
           darkMode
             ? 'bg-slate-900 border-slate-800 text-slate-100'
             : 'bg-white border-slate-200 text-slate-900'
         }`}
       >
-        {/* Header Bar of the AI & Frozen Classes Studio */}
-        <div
-          className={`px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 border-b ${
-            darkMode
-              ? 'bg-slate-900 border-slate-800'
-              : 'bg-slate-50/90 border-slate-200'
-          }`}
-        >
-          <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-sky-700 text-white flex items-center justify-center shrink-0">
-              <Wand2 className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-xs sm:text-sm font-bold tracking-tight flex items-center gap-2">
-                <span>
-                  Générer avec l'IA selon votre Idée / Ordre & Classes Figées
-                </span>
-                <span className="text-[11px] font-normal text-slate-500 hidden md:inline">
-                  · Les matières sans place logique restent automatiquement à côté
-                </span>
-              </h2>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
+        {/* Top Row: Big Action Buttons (Conflicts, AI Order, Freeze, Side Tray, Export/Print) */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5 pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* BUTTON 1: CONFLICTS & CONTRADICTIONS RADAR */}
             <button
               type="button"
-              onClick={() => setShowFreezeSelector((v) => !v)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border flex items-center gap-1.5 transition-colors cursor-pointer ${
-                frozenClassIds.length > 0 || frozenSubjects.length > 0
-                  ? 'bg-amber-50 border-amber-300 text-amber-900 dark:bg-amber-950/60 dark:border-amber-700 dark:text-amber-200'
-                  : darkMode
-                  ? 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
-                  : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+              onClick={() => setShowConflictsPanel((v) => !v)}
+              className={`px-3.5 py-2 rounded-lg text-xs font-bold border flex items-center gap-2 transition-all cursor-pointer ${
+                conflictAnalysis.items.length > 0
+                  ? criticalConflictsCount > 0
+                    ? 'bg-rose-600 text-white border-rose-700 shadow-xs hover:bg-rose-700'
+                    : 'bg-amber-500 text-slate-950 border-amber-600 shadow-xs hover:bg-amber-600'
+                  : 'bg-emerald-50 border-emerald-300 text-emerald-900 dark:bg-emerald-950/60 dark:border-emerald-700 dark:text-emerald-200'
               }`}
             >
-              <Lock className="w-3.5 h-3.5 text-amber-600" />
+              {conflictAnalysis.items.length > 0 ? (
+                <ShieldAlert className="w-4 h-4 shrink-0" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              )}
               <span>
-                Garder positions : {frozenClassIds.length} classe(s)
-                {frozenSubjects.length > 0
-                  ? ` · ${frozenSubjects.length} matière(s)`
-                  : ''}
+                {conflictAnalysis.items.length > 0
+                  ? `Conflits & Contradictions (${conflictAnalysis.items.length})`
+                  : '0 Conflit · Emploi 100% Cohérent'}
               </span>
-              {showFreezeSelector ? (
+              {showConflictsPanel ? (
                 <ChevronUp className="w-3.5 h-3.5" />
               ) : (
                 <ChevronDown className="w-3.5 h-3.5" />
               )}
             </button>
 
+            {/* BUTTON 2: AI ORDER & GENERATION STUDIO */}
+            <button
+              type="button"
+              onClick={() => setShowAiGeneratorPanel((v) => !v)}
+              className={`px-3.5 py-2 rounded-lg text-xs font-bold border flex items-center gap-2 transition-colors cursor-pointer ${
+                showAiGeneratorPanel
+                  ? 'bg-sky-700 text-white border-sky-800 shadow-xs'
+                  : darkMode
+                  ? 'bg-slate-800 border-slate-700 text-sky-300 hover:bg-slate-700'
+                  : 'bg-sky-50 border-sky-300 text-sky-900 hover:bg-sky-100'
+              }`}
+            >
+              <Wand2 className="w-4 h-4" />
+              <span>Ordre IA & Générer</span>
+              {showAiGeneratorPanel ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            {/* BUTTON 3: KEEP POSITIONS (FROZEN CLASSES) */}
+            <button
+              type="button"
+              onClick={() => setShowFreezeSelector((v) => !v)}
+              className={`px-3 py-2 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                frozenClassIds.length > 0 || frozenSubjects.length > 0
+                  ? 'bg-amber-100 border-amber-400 text-amber-950 dark:bg-amber-950/70 dark:border-amber-700 dark:text-amber-200'
+                  : darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
+                  : 'bg-slate-100 border-slate-300 text-slate-800 hover:bg-slate-200'
+              }`}
+            >
+              <Lock className="w-3.5 h-3.5 text-amber-600" />
+              <span>
+                Garder positions ({frozenClassIds.length})
+              </span>
+            </button>
+
+            {/* BUTTON 4: MATIÈRES À CÔTÉ (SIDE TRAY) */}
             <button
               type="button"
               onClick={() => setShowSideTray((v) => !v)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border flex items-center gap-1.5 transition-colors cursor-pointer ${
-                unplacedLessons.length > 0
-                  ? 'bg-indigo-600 text-white border-indigo-700'
+              className={`px-3 py-2 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                showSideTray
+                  ? 'bg-indigo-600 text-white border-indigo-700 shadow-xs'
                   : darkMode
                   ? 'bg-slate-800 border-slate-700 text-slate-200'
-                  : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                  : 'bg-slate-100 border-slate-300 text-slate-800 hover:bg-slate-200'
               }`}
             >
               {showSideTray ? (
@@ -597,418 +715,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
               <span>Matières à Côté ({unplacedLessons.length})</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setShowAiGeneratorPanel((v) => !v)}
-              className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-200/60 cursor-pointer"
-              title={showAiGeneratorPanel ? 'Réduire' : 'Développer'}
-            >
-              {showAiGeneratorPanel ? (
-                <ChevronUp className="w-4 h-4" />
-              ) : (
-                <ChevronDown className="w-4 h-4" />
-              )}
-            </button>
-          </div>
-        </div>
-
-        {showAiGeneratorPanel && (
-          <div className="p-3.5 space-y-3">
-            {/* Row 1: Multi-line Order Textarea + Action Buttons */}
-            <div className="flex flex-col lg:flex-row items-stretch gap-2.5">
-              <div className="flex-1 relative">
-                <textarea
-                  rows={3}
-                  value={aiOrderInput}
-                  onChange={(e) => onChangeAiOrderInput(e.target.value)}
-                  placeholder="Collez ou écrivez votre ordre complet (scission de classes Grade 3A/3B, répartition des matières et enseignantes, charges horaires, séances communes ou complémentaires...)"
-                  className={`w-full pl-3.5 pr-9 py-2 text-xs leading-relaxed border rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600 resize-y ${
-                    darkMode
-                      ? 'bg-slate-800 border-slate-700 text-white placeholder:text-slate-400'
-                      : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'
-                  }`}
-                />
-                {aiOrderInput && (
-                  <button
-                    type="button"
-                    onClick={() => onChangeAiOrderInput('')}
-                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 cursor-pointer"
-                    title="Effacer l'ordre"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-
-              <div className="flex flex-col justify-between gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  disabled={isGeneratingAiOrder}
-                  onClick={onGenerateWithAiOrder}
-                  className="px-4 py-2.5 bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xs transition-colors cursor-pointer"
-                >
-                  <Sparkles className="w-4 h-4" />
-                  <span>
-                    {isGeneratingAiOrder
-                      ? 'Application de l’ordre en cours...'
-                      : 'Traiter & Appliquer cet Ordre'}
-                  </span>
-                </button>
-                <div className="text-[10px] text-slate-500 text-center">
-                  Sans endommager les autres classes · 0 conflit
-                </div>
-              </div>
-            </div>
-
-            {/* Row 2: Quick Idea / Order Presets */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] font-semibold text-slate-500 mr-1">
-                Ordres rapides :
-              </span>
-              {PRESET_AI_ORDERS.map((preset) => (
-                <button
-                  key={preset.label}
-                  type="button"
-                  onClick={() => onChangeAiOrderInput(preset.prompt)}
-                  className={`px-2.5 py-1 rounded-md text-[11px] font-medium border transition-colors cursor-pointer ${
-                    aiOrderInput === preset.prompt
-                      ? 'bg-sky-50 border-sky-400 text-sky-900 font-semibold dark:bg-sky-950 dark:border-sky-600 dark:text-sky-200'
-                      : darkMode
-                      ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
-                      : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200/80'
-                  }`}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Collapsible Selector: Keep Positions for Specific Classes & Subjects */}
-            {showFreezeSelector && (
-              <div
-                className={`p-3 rounded-lg border space-y-3 ${
-                  darkMode
-                    ? 'bg-slate-800/70 border-slate-700'
-                    : 'bg-amber-50/50 border-amber-200'
-                }`}
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-                      <Lock className="w-3.5 h-3.5 text-amber-600" />
-                      <span>
-                        Sélectionnez les classes dont il faut GARDER les positions actuelles (Classes Figées) :
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-600 dark:text-slate-300">
-                      Les classes cochées ci-dessous (ou verrouillées avec 🔒 dans la colonne de gauche) ne changeront pas pendant la génération.
-                    </p>
-                  </div>
-
-                  {/* Quick Group Freeze Buttons */}
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => onSetFrozenClassIds([])}
-                      className="px-2 py-1 text-[11px] font-semibold bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded hover:bg-slate-100 cursor-pointer"
-                    >
-                      Tout libérer (0)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const kgIds = classes
-                          .filter((c) =>
-                            classMatchesCategory(c, 'KG_Maternelle')
-                          )
-                          .map((c) => c.id);
-                        onSetFrozenClassIds(
-                          Array.from(new Set([...frozenClassIds, ...kgIds]))
-                        );
-                      }}
-                      className="px-2 py-1 text-[11px] font-semibold bg-amber-100 text-amber-900 border border-amber-300 rounded hover:bg-amber-200 cursor-pointer"
-                    >
-                      + Figer Maternelle (KG)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const primIds = classes
-                          .filter((c) => classMatchesCategory(c, 'Primaire'))
-                          .map((c) => c.id);
-                        onSetFrozenClassIds(
-                          Array.from(new Set([...frozenClassIds, ...primIds]))
-                        );
-                      }}
-                      className="px-2 py-1 text-[11px] font-semibold bg-amber-100 text-amber-900 border border-amber-300 rounded hover:bg-amber-200 cursor-pointer"
-                    >
-                      + Figer Primaire
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const secIds = classes
-                          .filter((c) => classMatchesCategory(c, 'Secondaire'))
-                          .map((c) => c.id);
-                        onSetFrozenClassIds(
-                          Array.from(new Set([...frozenClassIds, ...secIds]))
-                        );
-                      }}
-                      className="px-2 py-1 text-[11px] font-semibold bg-amber-100 text-amber-900 border border-amber-300 rounded hover:bg-amber-200 cursor-pointer"
-                    >
-                      + Figer Secondaire
-                    </button>
-                  </div>
-                </div>
-
-                {/* Class Checkboxes Grid */}
-                <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-1">
-                  {classes.map((cls) => {
-                    const isFrozen = frozenSet.has(cls.id);
-                    return (
-                      <button
-                        key={cls.id}
-                        type="button"
-                        onClick={() => onToggleFreezeClass(cls.id)}
-                        className={`px-2.5 py-1 rounded text-xs font-semibold border flex items-center gap-1.5 transition-all cursor-pointer ${
-                          isFrozen
-                            ? 'bg-amber-600 text-white border-amber-700 shadow-2xs'
-                            : darkMode
-                            ? 'bg-slate-900 border-slate-700 text-slate-300 hover:border-amber-500'
-                            : 'bg-white border-slate-300 text-slate-700 hover:border-amber-500'
-                        }`}
-                      >
-                        {isFrozen ? (
-                          <Lock className="w-3 h-3" />
-                        ) : (
-                          <Unlock className="w-3 h-3 opacity-40" />
-                        )}
-                        <span>{cls.name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* Also allow keeping specific Subjects fixed across all classes */}
-                <div className="pt-2 border-t border-amber-200/70 dark:border-slate-700">
-                  <div className="text-[11px] font-bold text-slate-700 dark:text-slate-300 mb-1.5">
-                    Optionnel — Garder aussi la position actuelle de certaines matières dans toutes les classes :
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {allDistinctSubjects.map((subj) => {
-                      const isSubjFrozen = frozenSubjects.includes(subj);
-                      return (
-                        <button
-                          key={subj}
-                          type="button"
-                          onClick={() => onToggleFreezeSubject(subj)}
-                          className={`px-2 py-0.5 rounded text-[11px] font-medium border flex items-center gap-1 cursor-pointer ${
-                            isSubjFrozen
-                              ? 'bg-indigo-600 text-white border-indigo-700 font-semibold'
-                              : darkMode
-                              ? 'bg-slate-900 border-slate-700 text-slate-300'
-                              : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
-                          }`}
-                        >
-                          {isSubjFrozen && <Lock className="w-2.5 h-2.5" />}
-                          <span>{subj}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Last Generation Summary Banner + Teacher Load Verification Table */}
-            {lastGenerationReport && (
-              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-950 text-xs space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-start gap-2">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    <span>
-                      <strong>Ordre appliqué avec succès :</strong>{' '}
-                      {lastGenerationReport.summary}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3 font-mono text-[11px] shrink-0">
-                    <span>
-                      {lastGenerationReport.frozenClassesCount} classe(s) intacte(s) 🔒
-                    </span>
-                    <span>·</span>
-                    <span className="text-emerald-700 font-bold">
-                      {lastGenerationReport.placedCount} séances placées ✓
-                    </span>
-                    <span>·</span>
-                    <span className="text-indigo-700 font-bold">
-                      {lastGenerationReport.leftAsideCount} mise(s) à côté 👉
-                    </span>
-                  </div>
-                </div>
-
-                {lastGenerationReport.teacherLoadVerification &&
-                  lastGenerationReport.teacherLoadVerification.length > 0 && (
-                    <div className="pt-2 border-t border-emerald-200">
-                      <div className="text-[11px] font-bold text-emerald-950 mb-1.5">
-                        Vérification des Charges Horaires Cibles (Séances / Semaine) :
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                        {lastGenerationReport.teacherLoadVerification.map(
-                          (v) => (
-                            <div
-                              key={v.teacher}
-                              className="bg-white/90 border border-emerald-200 rounded-md px-2.5 py-1.5 flex flex-col justify-between"
-                            >
-                              <div className="flex items-center justify-between gap-1">
-                                <span className="font-bold text-slate-900 text-[11px]">
-                                  {v.teacher}
-                                </span>
-                                <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-mono font-bold text-[10px]">
-                                  {v.actualPeriods} / {v.targetPeriods} séances ✓
-                                </span>
-                              </div>
-                              <div className="text-[10px] text-slate-600 mt-0.5 leading-snug">
-                                {v.details}
-                              </div>
-                            </div>
-                          )
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                {lastGenerationReport.multiDeptReport &&
-                  lastGenerationReport.multiDeptReport.length > 0 && (
-                    <div className="pt-2 border-t border-emerald-200">
-                      <div className="text-[11px] font-bold text-emerald-950 mb-1.5 flex flex-wrap items-center justify-between gap-2">
-                        <span>
-                          Enseignants Multi-Départements (Organisation Matin Dépt 1 / Après-midi Dépt 2 & Respect des Pauses Inter-Sections) :
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-sky-100 text-sky-900 font-mono text-[10px] font-bold">
-                          0 Intersection Horaire / Pause (Break) ✓
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
-                        {lastGenerationReport.multiDeptReport.map((m) => (
-                          <div
-                            key={m.teacher}
-                            className="bg-white/90 border border-sky-200 rounded-md px-2.5 py-1.5 flex flex-col justify-between"
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <span className="font-bold text-slate-900 text-[11px]">
-                                {m.teacher}
-                              </span>
-                              <span className="px-1.5 py-0.5 rounded bg-sky-100 text-sky-900 font-mono font-bold text-[10px]">
-                                {m.departments.length} dépts · 0 chevauchement
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-sky-900 font-medium mt-0.5 truncate">
-                              {m.departments.join(' ⇄ ')}
-                            </div>
-                            <div className="text-[10px] text-slate-600 mt-0.5 leading-snug">
-                              {m.patternSummary}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* =====================================================================
-          2. BARRE DE FILTRES RAPIDES VUE D'ENSEMBLE
-         ===================================================================== */}
-      <div
-        className={`border rounded-lg p-3 space-y-2.5 ${
-          darkMode
-            ? 'bg-slate-900 border-slate-800 text-slate-100'
-            : 'bg-white border-slate-300 text-slate-900'
-        }`}
-      >
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Category Filter Tabs: 6 Départements Officiels + 3 Sections */}
-          <div className="flex flex-col gap-1.5">
-            <div className="flex flex-wrap items-center gap-1">
-              <span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500 mr-1 flex items-center gap-1">
-                <Layers className="w-3 h-3 text-sky-600" />
-                <span>6 Départements :</span>
-              </span>
-              {(
-                ['ALL', ...OFFICIAL_DEPARTMENT_CATEGORIES] as SchoolCategory[]
-              ).map((cat) => {
-                const count = classes.filter((c) =>
-                  classMatchesCategory(c, cat)
-                ).length;
-                const isSelected = selectedCategory === cat;
-                return (
-                  <button
-                    key={cat}
-                    onClick={() => onSelectCategory(cat)}
-                    className={`px-2 py-1 text-[11px] font-semibold rounded transition-colors flex items-center gap-1 cursor-pointer ${
-                      isSelected
-                        ? 'bg-sky-700 text-white shadow-xs'
-                        : darkMode
-                        ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                    }`}
-                  >
-                    <span>{CATEGORY_SHORT_LABELS[cat]}</span>
-                    <span
-                      className={`text-[10px] font-mono px-1 rounded ${
-                        isSelected
-                          ? 'bg-sky-900/60 text-sky-100'
-                          : 'bg-slate-200/80 text-slate-600'
-                      }`}
-                    >
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex flex-wrap items-center gap-1">
-              <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 mr-1">
-                3 Sections (Fr / Brit / Am) :
-              </span>
-              {CURRICULUM_SECTION_CATEGORIES.map((cat) => {
-                const count = classes.filter((c) =>
-                  classMatchesCategory(c, cat)
-                ).length;
-                const isSelected = selectedCategory === cat;
-                return (
-                  <button
-                    key={cat}
-                    onClick={() => onSelectCategory(cat)}
-                    className={`px-2 py-0.5 text-[11px] font-semibold rounded border transition-colors flex items-center gap-1 cursor-pointer ${
-                      isSelected
-                        ? 'bg-indigo-700 text-white border-indigo-800 shadow-xs'
-                        : darkMode
-                        ? 'bg-slate-800 border-slate-700 text-indigo-300 hover:bg-slate-700'
-                        : 'bg-indigo-50/70 border-indigo-200 text-indigo-900 hover:bg-indigo-100'
-                    }`}
-                  >
-                    <span>{CATEGORY_SHORT_LABELS[cat]}</span>
-                    <span
-                      className={`text-[10px] font-mono px-1 rounded ${
-                        isSelected
-                          ? 'bg-indigo-950/60 text-indigo-100'
-                          : 'bg-indigo-100 text-indigo-800'
-                      }`}
-                    >
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Right Actions */}
-          <div className="flex flex-wrap items-center gap-2">
+            {/* BUTTON 5: RASSEMBLER 2 CLASSES / 2 PROFS */}
             <button
               type="button"
               onClick={() => {
@@ -1023,32 +730,40 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                   onOpenJointModal();
                 }
               }}
-              className="px-2.5 py-1.5 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded flex items-center gap-1.5 shadow-xs cursor-pointer"
+              className={`px-3 py-2 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-200 hover:bg-slate-700'
+                  : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
+              }`}
             >
-              <GitMerge className="w-3.5 h-3.5" />
+              <GitMerge className="w-3.5 h-3.5 text-indigo-600" />
               <span>Rassembler 2 Classes / 2 Profs</span>
             </button>
 
+            {/* BUTTON 6: INTERCALATED SESSIONS */}
             <button
               type="button"
               onClick={() => setShowIntercalatedPanel((v) => !v)}
-              className={`px-2.5 py-1.5 text-xs font-semibold rounded border flex items-center gap-1.5 cursor-pointer ${
-                showIntercalatedPanel || highlightIntercalatedOnly
+              className={`px-3 py-2 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                showIntercalatedPanel
                   ? 'bg-amber-600 text-white border-amber-700'
                   : darkMode
-                  ? 'bg-slate-800 border-slate-700 text-amber-400'
-                  : 'bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100'
+                  ? 'bg-slate-800 border-slate-700 text-slate-300'
+                  : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
               }`}
             >
-              <ArrowLeftRight className="w-3.5 h-3.5" />
-              <span>Intercalées ({intercalatedSessions.length})</span>
+              <ArrowLeftRight className="w-3.5 h-3.5 text-amber-600" />
+              <span>Séances Partagées ({intercalatedSessions.length})</span>
             </button>
+          </div>
 
+          {/* Right: Export Excel + Print PDF + Fullscreen Grid */}
+          <div className="flex flex-wrap items-center gap-2">
             {onExportExcelEnsemble && (
               <button
                 type="button"
                 onClick={onExportExcelEnsemble}
-                className="px-2.5 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-800 text-white rounded flex items-center gap-1.5 shadow-xs cursor-pointer"
+                className="px-3 py-2 text-xs font-bold bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg flex items-center gap-1.5 shadow-2xs cursor-pointer"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5" />
                 <span>Excel</span>
@@ -1058,25 +773,131 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
             <button
               type="button"
               onClick={onPrintEnsemble}
-              className="px-2.5 py-1.5 text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-2 text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white rounded-lg flex items-center gap-1.5 shadow-2xs cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              <span>PDF</span>
+              <span>Imprimer PDF</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                const next = !isFullHeightGrid;
+                setIsFullHeightGrid(next);
+                if (next) {
+                  setShowSideTray(false);
+                  setShowAiGeneratorPanel(false);
+                }
+              }}
+              className={`px-3 py-2 text-xs font-bold rounded-lg border flex items-center gap-1.5 cursor-pointer ${
+                isFullHeightGrid
+                  ? 'bg-indigo-700 text-white border-indigo-800'
+                  : darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-200'
+                  : 'bg-slate-100 border-slate-300 text-slate-800 hover:bg-slate-200'
+              }`}
+              title="Agrandir la Vue d'Ensemble sur toute la largeur et hauteur"
+            >
+              {isFullHeightGrid ? (
+                <Minimize2 className="w-3.5 h-3.5" />
+              ) : (
+                <Maximize2 className="w-3.5 h-3.5" />
+              )}
+              <span>{isFullHeightGrid ? 'Vue Normale' : 'Plein Écran Grille'}</span>
             </button>
           </div>
         </div>
 
-        {/* Second Row: Find / Highlight Filter + Display Toggles */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-200/70 text-xs">
+        {/* Middle Row: 6 Official Departments & 3 Curriculum Sections Filter Bar */}
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-bold text-slate-500 mr-1 flex items-center gap-1">
+              <Layers className="w-3.5 h-3.5 text-sky-600" />
+              <span>Départements :</span>
+            </span>
+            {(
+              ['ALL', ...OFFICIAL_DEPARTMENT_CATEGORIES] as SchoolCategory[]
+            ).map((cat) => {
+              const count = classes.filter((c) =>
+                classMatchesCategory(c, cat)
+              ).length;
+              const isSelected = selectedCategory === cat;
+              return (
+                <button
+                  key={cat}
+                  onClick={() => onSelectCategory(cat)}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
+                    isSelected
+                      ? 'bg-sky-700 text-white shadow-2xs'
+                      : darkMode
+                      ? 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  <span>{CATEGORY_SHORT_LABELS[cat]}</span>
+                  <span
+                    className={`text-[10px] font-mono tabular-nums px-1.5 py-0.2 rounded ${
+                      isSelected
+                        ? 'bg-sky-900/70 text-sky-100'
+                        : 'bg-slate-200/90 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 mr-1">
+              3 Sections :
+            </span>
+            {CURRICULUM_SECTION_CATEGORIES.map((cat) => {
+              const count = classes.filter((c) =>
+                classMatchesCategory(c, cat)
+              ).length;
+              const isSelected = selectedCategory === cat;
+              return (
+                <button
+                  key={cat}
+                  onClick={() => onSelectCategory(cat)}
+                  className={`px-2.5 py-1 text-xs font-bold rounded-lg border transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ${
+                    isSelected
+                      ? 'bg-indigo-700 text-white border-indigo-800 shadow-2xs'
+                      : darkMode
+                      ? 'bg-slate-800 border-slate-700 text-indigo-300 hover:bg-slate-700'
+                      : 'bg-indigo-50/80 border-indigo-200 text-indigo-900 hover:bg-indigo-100'
+                  }`}
+                >
+                  <span>{CATEGORY_SHORT_LABELS[cat]}</span>
+                  <span
+                    className={`text-[10px] font-mono tabular-nums px-1.5 py-0.2 rounded ${
+                      isSelected
+                        ? 'bg-indigo-950/60 text-indigo-100'
+                        : 'bg-indigo-100 dark:bg-indigo-950 text-indigo-800 dark:text-indigo-200'
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Bottom Row: Search, Subject Filter, Conflict-Only Filter & Grid Size Controls */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2.5 border-t border-slate-200/80 dark:border-slate-800 text-xs">
           <div className="flex flex-wrap items-center gap-2">
+            {/* Search Teacher or Subject */}
             <div className="relative flex items-center">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5" />
               <input
                 type="text"
                 value={highlightFilter}
                 onChange={(e) => setHighlightFilter(e.target.value)}
-                placeholder="Chercher matière ou enseignant..."
-                className={`pl-8 pr-6 py-1 text-xs border rounded w-56 ${
+                placeholder="Chercher un prof ou une matière..."
+                className={`pl-8 pr-7 py-1.5 text-xs font-medium border rounded-lg w-60 ${
                   darkMode
                     ? 'bg-slate-800 border-slate-700 text-white'
                     : 'bg-slate-50 border-slate-300 text-slate-900'
@@ -1085,24 +906,25 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
               {highlightFilter && (
                 <button
                   onClick={() => setHighlightFilter('')}
-                  className="absolute right-2 text-slate-400 hover:text-slate-700"
+                  className="absolute right-2 text-slate-400 hover:text-slate-700 cursor-pointer"
                 >
-                  <X className="w-3 h-3" />
+                  <X className="w-3.5 h-3.5" />
                 </button>
               )}
             </div>
 
+            {/* Filter by Subject */}
             <select
               value={highlightFilter}
               onChange={(e) => setHighlightFilter(e.target.value)}
               aria-label="Filtrer par matière"
-              className={`px-2 py-1 text-xs border rounded ${
+              className={`px-2.5 py-1.5 text-xs font-medium border rounded-lg ${
                 darkMode
                   ? 'bg-slate-800 border-slate-700 text-slate-200'
                   : 'bg-slate-50 border-slate-300 text-slate-800'
               }`}
             >
-              <option value="">-- Surligner une Matière --</option>
+              <option value="">-- Filtrer par Matière --</option>
               {allDistinctSubjects.map((sub) => (
                 <option key={sub} value={sub}>
                   {sub}
@@ -1110,48 +932,583 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
               ))}
             </select>
 
-            <label className="inline-flex items-center gap-1.5 cursor-pointer select-none ml-1">
+            {/* Filter by Teacher */}
+            <select
+              value={highlightFilter}
+              onChange={(e) => setHighlightFilter(e.target.value)}
+              aria-label="Filtrer par enseignant"
+              className={`px-2.5 py-1.5 text-xs font-medium border rounded-lg ${
+                darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-200'
+                  : 'bg-slate-50 border-slate-300 text-slate-800'
+              }`}
+            >
+              <option value="">-- Filtrer par Enseignant --</option>
+              {allTeacherNames.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+
+            {/* Toggle: Show Only Classes/Cells with Conflicts */}
+            <button
+              type="button"
+              onClick={() => setOnlyShowConflictCells((v) => !v)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-colors cursor-pointer ${
+                onlyShowConflictCells
+                  ? 'bg-rose-600 text-white border-rose-700'
+                  : darkMode
+                  ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+                  : 'bg-rose-50/70 border-rose-200 text-rose-900 hover:bg-rose-100'
+              }`}
+            >
+              <Filter className="w-3.5 h-3.5" />
+              <span>
+                {onlyShowConflictCells
+                  ? 'Afficher toutes les classes'
+                  : `Isoler les conflits (${conflictAnalysis.items.length})`}
+              </span>
+            </button>
+          </div>
+
+          {/* Right: Display Options (Show Teacher + Grid Density Selector) */}
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="inline-flex items-center gap-1.5 cursor-pointer select-none font-semibold">
               <input
                 type="checkbox"
                 checked={showTeacherSubtext}
                 onChange={(e) => setShowTeacherSubtext(e.target.checked)}
-                className="accent-sky-700"
+                className="accent-sky-700 w-3.5 h-3.5"
               />
-              <span className="text-[11px] font-medium">
-                Afficher Enseignant
-              </span>
+              <span>Afficher nom du prof</span>
             </label>
-          </div>
 
-          <div className="flex items-center gap-3 text-[11px]">
-            <span className="inline-flex items-center gap-1 font-medium text-amber-700 dark:text-amber-400">
-              <Lock className="w-3 h-3" />
-              Cliquez sur 🔒 à gauche d'une classe pour garder ses positions
-            </span>
-            <span className="text-slate-300">·</span>
-            <span className="inline-flex items-center gap-1 font-medium text-emerald-700 dark:text-emerald-400">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span>
-              Vert = Place logique sans conflit
-            </span>
+            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg border border-slate-200 dark:border-slate-700">
+              <span className="text-[11px] font-semibold text-slate-500 px-1.5">
+                Taille :
+              </span>
+              {(
+                [
+                  ['compact', 'Compact'],
+                  ['comfort', 'Clair & Lisible'],
+                  ['large', 'Grand XL'],
+                ] as const
+              ).map(([modeKey, label]) => (
+                <button
+                  key={modeKey}
+                  type="button"
+                  onClick={() => setGridDensity(modeKey)}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                    gridDensity === modeKey
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
 
       {/* =====================================================================
+          2. CENTRE DES CONFLITS & CONTRADICTIONS (TRÈS CLAIR ET BIEN SIGNALÉ)
+         ===================================================================== */}
+      {showConflictsPanel && (
+        <div
+          className={`border-2 rounded-xl overflow-hidden shadow-xs transition-all ${
+            conflictAnalysis.items.length > 0
+              ? criticalConflictsCount > 0
+                ? darkMode
+                  ? 'bg-rose-950/30 border-rose-700 text-slate-100'
+                  : 'bg-rose-50/70 border-rose-400 text-slate-900'
+                : darkMode
+                ? 'bg-amber-950/30 border-amber-700 text-slate-100'
+                : 'bg-amber-50/70 border-amber-400 text-slate-900'
+              : darkMode
+              ? 'bg-emerald-950/20 border-emerald-800 text-slate-100'
+              : 'bg-emerald-50/60 border-emerald-300 text-slate-900'
+          }`}
+        >
+          {/* Header of the Conflict Center */}
+          <div
+            className={`px-4 py-3 flex flex-wrap items-center justify-between gap-3 border-b ${
+              conflictAnalysis.items.length > 0
+                ? criticalConflictsCount > 0
+                  ? darkMode
+                    ? 'bg-rose-950/60 border-rose-800'
+                    : 'bg-rose-100/90 border-rose-300'
+                  : darkMode
+                  ? 'bg-amber-950/60 border-amber-800'
+                  : 'bg-amber-100/90 border-amber-300'
+                : darkMode
+                ? 'bg-emerald-950/40 border-emerald-800'
+                : 'bg-emerald-100/80 border-emerald-200'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <div
+                className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 font-bold ${
+                  conflictAnalysis.items.length > 0
+                    ? criticalConflictsCount > 0
+                      ? 'bg-rose-600 text-white'
+                      : 'bg-amber-500 text-slate-950'
+                    : 'bg-emerald-600 text-white'
+                }`}
+              >
+                {conflictAnalysis.items.length > 0 ? (
+                  <AlertTriangle className="w-4 h-4" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4" />
+                )}
+              </div>
+              <div>
+                <h3 className="text-sm font-extrabold tracking-tight flex flex-wrap items-center gap-2">
+                  <span>
+                    {conflictAnalysis.items.length > 0
+                      ? `Radar des Conflits & Contradictions Détectés (${conflictAnalysis.items.length})`
+                      : 'Aucun Conflit ni Contradiction Détecté'}
+                  </span>
+                  {criticalConflictsCount > 0 && (
+                    <span className="text-xs font-mono font-bold text-rose-800 dark:text-rose-200">
+                      · {criticalConflictsCount} conflit(s) critique(s)
+                    </span>
+                  )}
+                  {warningContradictionsCount > 0 && (
+                    <span className="text-xs font-mono font-bold text-amber-900 dark:text-amber-300">
+                      · {warningContradictionsCount} contradiction(s) d'organisation
+                    </span>
+                  )}
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-300">
+                  {conflictAnalysis.items.length > 0
+                    ? 'Chaque conflit est encadré en ROUGE ou ORANGE directement sur la Vue d’Ensemble ci-dessous. Cliquez sur un conflit pour le localiser ou le résoudre automatiquement.'
+                    : 'Tous les cours respectent les disponibilités des enseignants, les pauses inter-sections et la séparation des départements.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {conflictAnalysis.items.some((i) => i.canAutoResolve) &&
+                onAutoResolveConflicts && (
+                  <button
+                    type="button"
+                    onClick={() => onAutoResolveConflicts()}
+                    className="px-3.5 py-2 rounded-lg text-xs font-extrabold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                  >
+                    <Wrench className="w-3.5 h-3.5" />
+                    <span>
+                      Résoudre Automatiquement Tous les Conflits (
+                      {conflictAnalysis.items.filter((i) => i.canAutoResolve).length})
+                    </span>
+                  </button>
+                )}
+
+              <button
+                type="button"
+                onClick={() => setShowConflictsPanel(false)}
+                className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-white/60 cursor-pointer"
+                title="Masquer ce panneau"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {conflictAnalysis.items.length > 0 && (
+            <div className="p-3.5 space-y-3">
+              {/* Filter Tabs by Type of Contradiction */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(
+                  [
+                    ['ALL', 'Tous', conflictAnalysis.items.length],
+                    [
+                      'double_booking',
+                      'Doublons Enseignant (2 classes en même temps)',
+                      conflictAnalysis.items.filter(
+                        (i) => i.kind === 'double_booking'
+                      ).length,
+                    ],
+                    [
+                      'bell_break_overlap',
+                      'Chevauchement Pause / Horaire Inter-Sections',
+                      conflictAnalysis.items.filter(
+                        (i) => i.kind === 'bell_break_overlap'
+                      ).length,
+                    ],
+                    [
+                      'unavailable_slot',
+                      'Indisponibilités (✕)',
+                      conflictAnalysis.items.filter(
+                        (i) => i.kind === 'unavailable_slot'
+                      ).length,
+                    ],
+                    [
+                      'multi_dept_half_day',
+                      '2 Départements même demi-journée (Matin/PM)',
+                      conflictAnalysis.items.filter(
+                        (i) => i.kind === 'multi_dept_half_day'
+                      ).length,
+                    ],
+                    [
+                      'teacher_overload',
+                      'Dépassement Charge Max',
+                      conflictAnalysis.items.filter(
+                        (i) => i.kind === 'teacher_overload'
+                      ).length,
+                    ],
+                  ] as const
+                ).map(([k, label, cnt]) => {
+                  if (k !== 'ALL' && cnt === 0) return null;
+                  const active = conflictKindFilter === k;
+                  return (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => setConflictKindFilter(k)}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        active
+                          ? 'bg-slate-900 text-white border-slate-900 dark:bg-white dark:text-slate-900'
+                          : 'bg-white/90 dark:bg-slate-900 border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-white'
+                      }`}
+                    >
+                      <span>{label}</span>
+                      <span className="font-mono text-[11px] tabular-nums opacity-80">
+                        ({cnt})
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Grid of Clear Conflict Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 max-h-60 overflow-y-auto pr-1">
+                {filteredConflicts.map((item) => {
+                  const isCrit = item.severity === 'critical';
+                  return (
+                    <div
+                      key={item.id}
+                      className={`p-3 rounded-lg border bg-white dark:bg-slate-900 flex flex-col justify-between gap-2 shadow-2xs ${
+                        isCrit
+                          ? 'border-rose-300 dark:border-rose-800'
+                          : 'border-amber-300 dark:border-amber-800'
+                      }`}
+                    >
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-extrabold tracking-wide ${
+                              isCrit
+                                ? 'bg-rose-600 text-white'
+                                : 'bg-amber-500 text-slate-950'
+                            }`}
+                          >
+                            ⚠️ {item.badgeLabel}
+                          </span>
+                          {item.day && item.period && (
+                            <span className="font-mono text-xs font-bold text-slate-700 dark:text-slate-300 tabular-nums">
+                              {item.day} · P{item.period}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white leading-snug">
+                          {item.title}
+                        </div>
+
+                        <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                          {item.description}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => handleFocusConflictInMatrix(item)}
+                          className="px-2.5 py-1 rounded-md text-[11px] font-bold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 flex items-center gap-1 cursor-pointer"
+                        >
+                          <Eye className="w-3 h-3 text-sky-600" />
+                          <span>Localiser dans la grille</span>
+                        </button>
+
+                        {item.canAutoResolve && onAutoResolveConflicts && (
+                          <button
+                            type="button"
+                            onClick={() => onAutoResolveConflicts(item.id)}
+                            className="px-2.5 py-1 rounded-md text-[11px] font-bold bg-emerald-600 hover:bg-emerald-700 text-white flex items-center gap-1 cursor-pointer"
+                          >
+                            <Wrench className="w-3 h-3" />
+                            <span>Résoudre auto</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* =====================================================================
+          3. TIROIR : STUDIO IA (GÉNÉRER SELON IDÉE / ORDRE)
+         ===================================================================== */}
+      {showAiGeneratorPanel && (
+        <div
+          className={`border rounded-xl p-4 space-y-3 shadow-xs ${
+            darkMode
+              ? 'bg-slate-900 border-slate-800 text-slate-100'
+              : 'bg-white border-sky-200 text-slate-900'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Wand2 className="w-4 h-4 text-sky-600" />
+              <h3 className="text-sm font-bold">
+                Générer ou Modifier avec l'IA selon votre Ordre
+              </h3>
+              <span className="text-xs text-slate-500">
+                · Sans endommager les autres classes ni créer d'intersection horaire
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowAiGeneratorPanel(false)}
+              className="text-slate-400 hover:text-slate-700 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex flex-col lg:flex-row items-stretch gap-2.5">
+            <div className="flex-1 relative">
+              <textarea
+                rows={3}
+                value={aiOrderInput}
+                onChange={(e) => onChangeAiOrderInput(e.target.value)}
+                placeholder="Écrivez votre ordre (ex: scinder Grade 3 Boys en 3A/3B, répartir les matières, organiser les profs sur 2 départements Matin / Après-midi...)"
+                className={`w-full pl-3.5 pr-9 py-2 text-xs leading-relaxed border rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-600 resize-y ${
+                  darkMode
+                    ? 'bg-slate-800 border-slate-700 text-white placeholder:text-slate-400'
+                    : 'bg-slate-50 border-slate-300 text-slate-900 placeholder:text-slate-400'
+                }`}
+              />
+              {aiOrderInput && (
+                <button
+                  type="button"
+                  onClick={() => onChangeAiOrderInput('')}
+                  className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  title="Effacer l'ordre"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-col justify-between gap-1.5 shrink-0">
+              <button
+                type="button"
+                disabled={isGeneratingAiOrder}
+                onClick={onGenerateWithAiOrder}
+                className="px-4 py-2.5 bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white rounded-lg text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-xs transition-colors cursor-pointer"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>
+                  {isGeneratingAiOrder
+                    ? 'Application en cours...'
+                    : 'Traiter & Appliquer cet Ordre'}
+                </span>
+              </button>
+              <div className="text-[11px] text-slate-500 text-center">
+                Respecte les pauses & les classes figées
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-xs font-semibold text-slate-500 mr-1">
+              Exemples d'ordres :
+            </span>
+            {PRESET_AI_ORDERS.map((preset) => (
+              <button
+                key={preset.label}
+                type="button"
+                onClick={() => onChangeAiOrderInput(preset.prompt)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+                  aiOrderInput === preset.prompt
+                    ? 'bg-sky-50 border-sky-400 text-sky-900 font-semibold dark:bg-sky-950 dark:border-sky-600 dark:text-sky-200'
+                    : darkMode
+                    ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+                    : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200/80'
+                }`}
+              >
+                {preset.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Last Generation Report Banner */}
+      {lastGenerationReport && (
+        <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 text-emerald-950 dark:text-emerald-100 text-xs space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-start gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+              <span>
+                <strong>Ordre appliqué avec succès :</strong>{' '}
+                {lastGenerationReport.summary}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 font-mono text-xs tabular-nums shrink-0">
+              <span>{lastGenerationReport.frozenClassesCount} classe(s) intacte(s)</span>
+              <span>·</span>
+              <span className="text-emerald-700 dark:text-emerald-300 font-bold">
+                {lastGenerationReport.placedCount} séances placées
+              </span>
+              <span>·</span>
+              <span className="text-indigo-700 dark:text-indigo-300 font-bold">
+                {lastGenerationReport.leftAsideCount} mise(s) à côté
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          4. TIROIR : GARDER LES POSITIONS DE CERTAINES CLASSES (CLASSES FIGÉES)
+         ===================================================================== */}
+      {showFreezeSelector && (
+        <div
+          className={`p-4 rounded-xl border space-y-3 ${
+            darkMode
+              ? 'bg-slate-900 border-slate-700'
+              : 'bg-amber-50/70 border-amber-300'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                <Lock className="w-3.5 h-3.5 text-amber-600" />
+                <span>
+                  Sélectionnez les classes dont il faut GARDER les positions actuelles :
+                </span>
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-300">
+                Les classes cochées ci-dessous ne seront jamais modifiées lors d'une génération automatique.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onSetFrozenClassIds([])}
+                className="px-2.5 py-1 text-xs font-semibold bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                Tout débloquer (0)
+              </button>
+              {OFFICIAL_DEPARTMENT_CATEGORIES.map((dept) => (
+                <button
+                  key={dept}
+                  type="button"
+                  onClick={() => {
+                    const deptIds = classes
+                      .filter((c) => classMatchesCategory(c, dept))
+                      .map((c) => c.id);
+                    onSetFrozenClassIds(
+                      Array.from(new Set([...frozenClassIds, ...deptIds]))
+                    );
+                  }}
+                  className="px-2.5 py-1 text-xs font-semibold bg-amber-100 text-amber-950 border border-amber-300 rounded-lg hover:bg-amber-200 cursor-pointer"
+                >
+                  + Figer {CATEGORY_SHORT_LABELS[dept]}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setShowFreezeSelector(false)}
+                className="p-1 text-slate-500 hover:text-slate-900 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-1">
+            {classes.map((cls) => {
+              const isFrozen = frozenSet.has(cls.id);
+              return (
+                <button
+                  key={cls.id}
+                  type="button"
+                  onClick={() => onToggleFreezeClass(cls.id)}
+                  className={`px-2.5 py-1 rounded-lg text-xs font-bold border flex items-center gap-1.5 transition-all cursor-pointer ${
+                    isFrozen
+                      ? 'bg-amber-600 text-white border-amber-700 shadow-2xs'
+                      : darkMode
+                      ? 'bg-slate-800 border-slate-700 text-slate-300 hover:border-amber-500'
+                      : 'bg-white border-slate-300 text-slate-700 hover:border-amber-500'
+                  }`}
+                >
+                  {isFrozen ? (
+                    <Lock className="w-3 h-3" />
+                  ) : (
+                    <Unlock className="w-3 h-3 opacity-40" />
+                  )}
+                  <span>{cls.name}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="pt-2 border-t border-amber-200/70 dark:border-slate-700">
+            <div className="text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+              Optionnel — Garder aussi la position actuelle de certaines matières dans toutes les classes :
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              {allDistinctSubjects.map((subj) => {
+                const isSubjFrozen = frozenSubjects.includes(subj);
+                return (
+                  <button
+                    key={subj}
+                    type="button"
+                    onClick={() => onToggleFreezeSubject(subj)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium border flex items-center gap-1 cursor-pointer ${
+                      isSubjFrozen
+                        ? 'bg-indigo-600 text-white border-indigo-700 font-semibold'
+                        : darkMode
+                        ? 'bg-slate-800 border-slate-700 text-slate-300'
+                        : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {isSubjFrozen && <Lock className="w-3 h-3" />}
+                    <span>{subj}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
           INTERCALATED SESSIONS PANEL (Collapsible)
          ===================================================================== */}
       {showIntercalatedPanel && (
-        <div className="border-2 border-amber-300 bg-amber-50/90 text-slate-900 rounded-lg p-4 space-y-3">
+        <div className="border-2 border-amber-300 bg-amber-50/90 text-slate-900 rounded-xl p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-amber-950 flex items-center gap-2">
               <ArrowLeftRight className="w-4 h-4 text-amber-700" />
               <span>
-                Séances qui s'Intercalent, Groupes Dédoublés & Chevauchements ({intercalatedSessions.length})
+                Séances Partagées, Groupes Dédoublés & Classes Rassemblées ({intercalatedSessions.length})
               </span>
             </h3>
             <button
               onClick={() => setShowIntercalatedPanel(false)}
-              className="text-amber-900 hover:text-slate-950"
+              className="text-amber-900 hover:text-slate-950 cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -1160,19 +1517,19 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
             {intercalatedSessions.map((item) => (
               <div
                 key={item.id}
-                className="p-2.5 bg-white border border-amber-200 rounded text-xs flex flex-col justify-between gap-1"
+                className="p-2.5 bg-white border border-amber-200 rounded-lg text-xs flex flex-col justify-between gap-1"
               >
                 <div className="flex items-center justify-between">
                   <span className="font-bold text-amber-900">
                     {item.kind === 'joint_classes'
                       ? '⊕ Classes Rassemblées'
-                      : '⇄ Groupe Intercalé / 2 Profs'}
+                      : '⇄ Séance Partagée / 2 Profs'}
                   </span>
-                  <span className="font-mono text-[11px] font-bold text-slate-600">
+                  <span className="font-mono text-xs font-bold text-slate-600 tabular-nums">
                     {item.day} P{item.period}
                   </span>
                 </div>
-                <p className="text-[11px] text-slate-700 leading-snug">
+                <p className="text-xs text-slate-700 leading-snug">
                   {item.description}
                 </p>
               </div>
@@ -1182,25 +1539,196 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
       )}
 
       {/* =====================================================================
-          3. SPLIT WORKSPACE: VUE D'ENSEMBLE (LEFT) + BAC MATIÈRES À CÔTÉ (RIGHT)
+          5. BARRE D'ACTION CONTEXTUELLE (QUAND UNE SÉANCE OU CARTE EST SÉLECTIONNÉE)
+         ===================================================================== */}
+      {selectedSource && activeSourceClass && (
+        <div className="bg-slate-900 text-white rounded-xl p-3.5 shadow-md flex flex-wrap items-center justify-between gap-4 border border-slate-700">
+          {/* Left: Selected Subject Card + Any Conflict Alert */}
+          <div className="flex items-center gap-3">
+            <div
+              style={{
+                backgroundColor: activeSourceSlot
+                  ? getSubjectVisualStyle(activeSourceSlot.subject).bgHex
+                  : '#94a3b8',
+                color: activeSourceSlot
+                  ? getSubjectVisualStyle(activeSourceSlot.subject).textHex
+                  : '#0f172a',
+              }}
+              className="w-20 h-14 rounded-lg border-2 border-white flex flex-col items-center justify-center p-1 text-center shrink-0 shadow-xs"
+            >
+              <span className="text-xs font-extrabold leading-tight truncate w-full">
+                {activeSourceSlot?.subject || 'Libre'}
+              </span>
+              <span className="text-[10px] font-bold opacity-85 truncate w-full mt-0.5">
+                {activeSourceClass.name}
+              </span>
+            </div>
+
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-base font-extrabold text-amber-300 tracking-tight">
+                  {activeSourceSlot?.subject || 'Créneau Libre'}
+                </span>
+                <span className="text-xs font-mono bg-slate-800 px-2.5 py-0.5 rounded-md text-sky-300 tabular-nums">
+                  {activeSourceClass.name} ·{' '}
+                  {selectedSource.slotKey.replace('_', ' P')} (
+                  {getPeriodClockTime(
+                    activeSourceClass.section,
+                    Number(selectedSource.slotKey.split('_')[1])
+                  )}
+                  )
+                </span>
+                {activeSourceConflicts.map((c) => (
+                  <span
+                    key={c.id}
+                    className="px-2 py-0.5 rounded bg-rose-600 text-white text-xs font-extrabold"
+                  >
+                    ⚠️ {c.title}
+                  </span>
+                ))}
+              </div>
+              <div className="text-xs text-slate-300 mt-1 flex flex-wrap items-center gap-3">
+                <span>
+                  Enseignant :{' '}
+                  <strong className="text-white">
+                    {activeSourceSlot?.teacher || 'Aucun'}
+                  </strong>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Center: Recommended Conflict-Free Switches */}
+          <div className="flex-1 min-w-[260px]">
+            {hoveredCandidate &&
+            hoveredCandidate.targetKey !== selectedSource.slotKey ? (
+              <div
+                className={`p-2.5 rounded-lg border text-xs ${
+                  hoveredCandidate.status === 'optimal'
+                    ? 'bg-emerald-950/90 border-emerald-400 text-emerald-100'
+                    : hoveredCandidate.status === 'possible_warn'
+                    ? 'bg-amber-950/90 border-amber-400 text-amber-100'
+                    : 'bg-rose-950/90 border-rose-400 text-rose-100'
+                }`}
+              >
+                <div className="font-bold flex items-center justify-between">
+                  <span>
+                    Cible : {hoveredCandidate.day} P{hoveredCandidate.period} (
+                    {hoveredCandidate.targetSlot?.subject || 'Libre'} —{' '}
+                    {hoveredCandidate.targetSlot?.teacher || 'Aucun'})
+                  </span>
+                  <span className="font-mono tabular-nums">
+                    {hoveredCandidate.status === 'blocked'
+                      ? 'BLOQUÉ (CONFLIT)'
+                      : '✓ 100% COMPATIBLE'}
+                  </span>
+                </div>
+                <div className="text-xs mt-0.5">{hoveredCandidate.reason}</div>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-emerald-300 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>
+                    Cliquez sur une case encadrée en VERT (✓) sur la ligne{' '}
+                    {activeSourceClass.name} pour déplacer/permuter sans conflit :
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {topRecommendedSwitches.map((rec) => (
+                    <button
+                      key={rec.targetKey}
+                      onClick={() => {
+                        onSwitchSlots(
+                          activeSourceClass.id,
+                          selectedSource.slotKey,
+                          rec.targetKey
+                        );
+                        setSelectedSource(null);
+                      }}
+                      className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md text-xs font-bold flex items-center gap-1 shadow-2xs transition-colors cursor-pointer"
+                    >
+                      <ArrowLeftRight className="w-3 h-3" />
+                      <span>
+                        {rec.day} P{rec.period} (
+                        {rec.targetSlot?.subject || 'Créneau Libre'})
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Right: "Mettre à côté" + Edit + Cancel Actions */}
+          <div className="flex items-center gap-2 shrink-0">
+            {activeSourceSlot && (
+              <button
+                type="button"
+                onClick={() => {
+                  onMoveSlotToSideTray(
+                    activeSourceClass.id,
+                    selectedSource.slotKey
+                  );
+                  setShowSideTray(true);
+                  setSelectedSource(null);
+                }}
+                className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                title="Retirer cette séance de la grille et la garder à côté"
+              >
+                <span>Mettre à côté</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            <button
+              onClick={() => {
+                const [dStr, pStr] = selectedSource.slotKey.split('_');
+                onEditCell(
+                  activeSourceClass.id,
+                  dStr as DayOfWeek,
+                  Number(pStr),
+                  activeSourceSlot
+                );
+              }}
+              className="px-3 py-2 bg-white text-slate-900 hover:bg-slate-100 rounded-lg text-xs font-bold cursor-pointer"
+            >
+              Modifier séance
+            </button>
+            <button
+              onClick={() => setSelectedSource(null)}
+              className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold cursor-pointer"
+            >
+              Fermer
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          6. ESPACE PRINCIPAL : VUE D'ENSEMBLE ULTRA-CLAIRE (GAUCHE) + MATIÈRES À CÔTÉ (DROITE)
          ===================================================================== */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 items-start">
         {/* LEFT COLUMN: MASTER ENSEMBLE TABLE */}
         <div
           className={`${
-            showSideTray ? 'lg:col-span-9' : 'lg:col-span-12'
-          } border-2 border-slate-700 rounded-md overflow-hidden bg-[#cbd5e1] shadow-sm`}
+            showSideTray && !isFullHeightGrid ? 'lg:col-span-9' : 'lg:col-span-12'
+          } border rounded-xl overflow-hidden shadow-xs ${
+            darkMode
+              ? 'bg-slate-900 border-slate-700'
+              : 'bg-white border-slate-300'
+          }`}
         >
           {/* Active Manual Placement Banner when a Side Card is selected */}
           {selectedSideCard && (
-            <div className="bg-emerald-900 text-white px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs border-b border-emerald-700">
+            <div className="bg-emerald-800 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs border-b border-emerald-700">
               <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded bg-emerald-500 text-slate-950 font-extrabold uppercase text-[10px]">
+                <span className="px-2 py-0.5 rounded bg-emerald-400 text-slate-950 font-extrabold uppercase text-[10px]">
                   Placement Manuel Actif
                 </span>
                 <span>
-                  Cliquez sur une case <strong>verte (✓)</strong> de la ligne{' '}
-                  <strong className="underline text-yellow-300">
+                  Cliquez sur une case <strong>verte (✓ LIBRE)</strong> de la ligne{' '}
+                  <strong className="underline text-amber-300">
                     {selectedSideCard.className}
                   </strong>{' '}
                   pour placer{' '}
@@ -1213,43 +1741,126 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
               <button
                 type="button"
                 onClick={() => setSelectedSideCardId(null)}
-                className="px-2 py-0.5 rounded bg-emerald-950 hover:bg-slate-900 text-emerald-200 text-[11px] font-semibold cursor-pointer"
+                className="px-2.5 py-1 rounded bg-emerald-950 hover:bg-slate-900 text-emerald-100 text-xs font-bold cursor-pointer"
               >
                 Annuler sélection
               </button>
             </div>
           )}
 
-          <div className="overflow-x-auto max-h-[640px]">
-            <table className="w-full border-collapse table-fixed min-w-[1260px] select-none">
+          {/* Legend strip right above table */}
+          <div
+            className={`px-4 py-2 border-b flex flex-wrap items-center justify-between gap-3 text-xs ${
+              darkMode
+                ? 'bg-slate-900 border-slate-800 text-slate-300'
+                : 'bg-slate-50 border-slate-200 text-slate-700'
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-4">
+              <span className="font-extrabold text-slate-900 dark:text-white">
+                Vue d'Ensemble ({filteredClasses.length} classes affichées)
+              </span>
+              <span className="text-slate-400">·</span>
+              <span className="inline-flex items-center gap-1.5 font-bold text-rose-700 dark:text-rose-400">
+                <span className="w-3 h-3 rounded-xs bg-rose-600 inline-block" />
+                Cadre Rouge = Conflit (Doublon / Pause / Indispo)
+              </span>
+              <span className="inline-flex items-center gap-1.5 font-bold text-amber-700 dark:text-amber-400">
+                <span className="w-3 h-3 rounded-xs bg-amber-500 inline-block" />
+                Cadre Orange = Contradiction 2 Départements
+              </span>
+              <span className="inline-flex items-center gap-1.5 font-bold text-emerald-700 dark:text-emerald-400">
+                <span className="w-3 h-3 rounded-xs bg-emerald-600 inline-block" />
+                Cadre Vert = Place logique 100% libre
+              </span>
+            </div>
+
+            <div className="text-[11px] text-slate-500">
+              1 clic = Sélectionner / Permuter · Double-clic = Éditer la séance
+            </div>
+          </div>
+
+          <div
+            className={`overflow-x-auto ${
+              isFullHeightGrid ? 'max-h-[82vh]' : 'max-h-[680px]'
+            }`}
+          >
+            <table
+              className={`w-full border-collapse table-fixed ${minTableWidthClass} select-none`}
+            >
               <thead className="sticky top-0 z-20">
-                <tr className="bg-[#cbd5e1] text-slate-950 h-6">
+                {/* Day Header Row */}
+                <tr
+                  className={
+                    darkMode
+                      ? 'bg-slate-900 text-slate-100 h-8'
+                      : 'bg-slate-100 text-slate-900 h-8'
+                  }
+                >
                   <th
                     rowSpan={2}
-                    className="w-[134px] sticky left-0 z-30 bg-[#cbd5e1] border border-slate-600 px-2 text-left text-xs font-extrabold tracking-tight"
+                    className={`w-[178px] sticky left-0 z-30 border-b border-r-2 px-3 text-left text-xs font-extrabold tracking-tight ${
+                      darkMode
+                        ? 'bg-slate-900 border-slate-700 text-white'
+                        : 'bg-slate-100 border-slate-300 text-slate-950'
+                    }`}
                   >
-                    Classe ({filteredClasses.length})
+                    <div>Classe ({filteredClasses.length})</div>
+                    <div className="text-[10px] font-medium text-slate-500 mt-0.5">
+                      Département · Section
+                    </div>
                   </th>
-                  {DAYS_OF_WEEK.map((day) => (
+                  {DAYS_OF_WEEK.map((day, dIdx) => (
                     <th
                       key={day}
                       colSpan={8}
-                      className="border border-slate-600 bg-[#cbd5e1] text-center text-[11px] font-bold text-slate-900"
+                      className={`border-b border-r-2 text-center text-xs font-extrabold tracking-wide ${
+                        darkMode
+                          ? dIdx % 2 === 0
+                            ? 'bg-slate-900 border-slate-700 text-sky-300'
+                            : 'bg-slate-800/90 border-slate-700 text-indigo-300'
+                          : dIdx % 2 === 0
+                          ? 'bg-slate-100 border-slate-400 text-slate-900'
+                          : 'bg-slate-200/75 border-slate-400 text-slate-950'
+                      }`}
                     >
                       {day}
                     </th>
                   ))}
                 </tr>
-                <tr className="bg-[#d8dee9] text-slate-900 h-5">
+
+                {/* Period Numbers Row (P1..P8 with half-day divider after P4) */}
+                <tr
+                  className={
+                    darkMode
+                      ? 'bg-slate-800 text-slate-200 h-6'
+                      : 'bg-slate-50 text-slate-700 h-6'
+                  }
+                >
                   {DAYS_OF_WEEK.map((day) =>
                     [1, 2, 3, 4, 5, 6, 7, 8].map((p) => (
                       <th
                         key={`${day}_p_${p}`}
-                        className={`border border-slate-500 text-center text-[10px] font-bold tabular-nums ${
-                          p === 8 ? 'border-r-2 border-r-slate-800' : ''
+                        className={`border-b border-r text-center text-[10px] font-bold font-mono tabular-nums ${
+                          darkMode ? 'border-slate-700' : 'border-slate-300'
+                        } ${
+                          p === 8
+                            ? darkMode
+                              ? 'border-r-2 border-r-slate-600'
+                              : 'border-r-2 border-r-slate-400'
+                            : p === 4
+                            ? darkMode
+                              ? 'border-r-2 border-r-sky-900/70'
+                              : 'border-r-2 border-r-slate-300'
+                            : ''
                         }`}
+                        title={
+                          p <= 4
+                            ? `Matin — Période ${p}`
+                            : `Après-midi — Période ${p}`
+                        }
                       >
-                        {p}
+                        P{p}
                       </th>
                     ))
                   )}
@@ -1269,11 +1880,13 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                   const unplacedForThisClass = unplacedLessons.filter(
                     (u) => u.classId === cls.id
                   ).length;
+                  const classConflictsCount =
+                    conflictAnalysis.classConflictCountMap.get(cls.id) || 0;
 
                   return (
                     <tr
                       key={cls.id}
-                      className={`h-[44px] transition-colors ${
+                      className={`${rowHeightClass} transition-colors ${
                         isSideCardTargetRow
                           ? 'ring-2 ring-emerald-500 z-10 relative'
                           : isRowActive
@@ -1281,20 +1894,24 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                           : ''
                       }`}
                     >
-                      {/* Sticky Left Column: Class Name + Rename (✏️) + Freeze Position Button (🔒) */}
+                      {/* Sticky Left Column: Class Name + Conflict Badge + Rename (✏️) + Freeze (🔒) */}
                       <td
-                        className={`sticky left-0 z-10 border border-slate-600 px-1.5 py-0.5 text-left align-middle ${
+                        className={`sticky left-0 z-10 border-b border-r-2 px-2.5 py-1 text-left align-middle ${
                           isSideCardTargetRow
-                            ? 'bg-emerald-950 text-white'
+                            ? 'bg-emerald-950 text-white border-emerald-700'
                             : isRowActive
-                            ? 'bg-sky-950 text-white'
+                            ? 'bg-sky-950 text-white border-sky-700'
                             : isClassFrozen
-                            ? 'bg-amber-100 text-slate-950'
-                            : 'bg-[#cbd5e1] text-slate-950'
+                            ? darkMode
+                              ? 'bg-amber-950/60 text-amber-100 border-slate-700'
+                              : 'bg-amber-50 text-slate-950 border-slate-300'
+                            : darkMode
+                            ? 'bg-slate-900 text-slate-100 border-slate-700'
+                            : 'bg-white text-slate-950 border-slate-300'
                         }`}
                       >
                         {editingClassMetaId === cls.id ? (
-                          <div className="p-1 bg-white text-slate-900 rounded border border-indigo-500 space-y-1 shadow-md">
+                          <div className="p-1.5 bg-white text-slate-900 rounded-lg border border-indigo-500 space-y-1 shadow-md">
                             <input
                               type="text"
                               value={editClassNameVal}
@@ -1302,7 +1919,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                 setEditClassNameVal(e.target.value)
                               }
                               placeholder="Nom classe"
-                              className="w-full px-1.5 py-0.5 text-[10px] font-bold border border-slate-300 rounded"
+                              className="w-full px-1.5 py-0.5 text-xs font-bold border border-slate-300 rounded"
                             />
                             <select
                               value={editClassCatVal}
@@ -1314,7 +1931,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                   >
                                 )
                               }
-                              className="w-full px-1 py-0.5 text-[9px] font-semibold border border-slate-300 rounded bg-white"
+                              className="w-full px-1 py-0.5 text-[10px] font-semibold border border-slate-300 rounded bg-white"
                             >
                               {OFFICIAL_DEPARTMENT_CATEGORIES.map((d) => (
                                 <option key={d} value={d}>
@@ -1338,40 +1955,48 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                   }
                                   setEditingClassMetaId(null);
                                 }}
-                                className="flex-1 px-1 py-0.5 rounded bg-emerald-600 text-white text-[9px] font-bold cursor-pointer"
+                                className="flex-1 px-1.5 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold cursor-pointer"
                               >
-                                OK
+                                Enregistrer
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setEditingClassMetaId(null)}
-                                className="px-1 py-0.5 rounded bg-slate-200 text-slate-700 text-[9px] font-bold cursor-pointer"
+                                className="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] font-bold cursor-pointer"
                               >
                                 ✕
                               </button>
                             </div>
                           </div>
                         ) : (
-                          <div className="flex items-center justify-between gap-0.5">
+                          <div className="flex items-center justify-between gap-1">
                             <div className="min-w-0 flex-1">
-                              <div className="text-[11px] font-extrabold leading-tight truncate flex items-center gap-1">
-                                <span>{cls.name}</span>
+                              <div className="text-xs font-extrabold leading-tight truncate flex items-center gap-1.5">
+                                <span className="truncate">{cls.name}</span>
+                                {classConflictsCount > 0 && (
+                                  <span
+                                    title={`${classConflictsCount} conflit(s) ou contradiction(s) dans ${cls.name}`}
+                                    className="px-1.5 py-0.2 rounded bg-rose-600 text-white text-[9px] font-mono font-extrabold shrink-0"
+                                  >
+                                    ⚠️ {classConflictsCount}
+                                  </span>
+                                )}
                                 {unplacedForThisClass > 0 && (
                                   <span
                                     title={`${unplacedForThisClass} matière(s) à côté pour ${cls.name}`}
-                                    className="px-1 rounded bg-indigo-600 text-white text-[9px] font-mono"
+                                    className="px-1 rounded bg-indigo-600 text-white text-[9px] font-mono shrink-0"
                                   >
                                     +{unplacedForThisClass}
                                   </span>
                                 )}
                               </div>
                               <div
-                                className={`text-[9px] leading-none mt-0.5 truncate ${
+                                className={`text-[10px] leading-tight mt-0.5 truncate ${
                                   isRowActive || isSideCardTargetRow
-                                    ? 'text-sky-300'
+                                    ? 'text-sky-200'
                                     : isClassFrozen
-                                    ? 'text-amber-800 font-semibold'
-                                    : 'text-slate-600'
+                                    ? 'text-amber-700 dark:text-amber-300 font-semibold'
+                                    : 'text-slate-500 dark:text-slate-400'
                                 }`}
                               >
                                 {isClassFrozen
@@ -1391,9 +2016,9 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                   setEditClassRoomVal(cls.room);
                                 }}
                                 title={`Renommer ou modifier le département de ${cls.name}`}
-                                className="p-0.5 rounded text-slate-600 hover:bg-slate-300/80 hover:text-indigo-700 transition-colors cursor-pointer"
+                                className="p-1 rounded text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800 hover:text-indigo-600 transition-colors cursor-pointer"
                               >
-                                <Edit3 className="w-2.5 h-2.5" />
+                                <Edit3 className="w-3 h-3" />
                               </button>
 
                               <button
@@ -1405,18 +2030,18 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                 title={
                                   isClassFrozen
                                     ? `Positions gardées pour ${cls.name} (cliquer pour débloquer)`
-                                    : `Garder les positions des matières pour ${cls.name} lors de la génération`
+                                    : `Garder les positions des matières pour ${cls.name}`
                                 }
-                                className={`p-0.5 rounded transition-colors shrink-0 cursor-pointer ${
+                                className={`p-1 rounded transition-colors shrink-0 cursor-pointer ${
                                   isClassFrozen
                                     ? 'bg-amber-600 text-white hover:bg-amber-700'
-                                    : 'text-slate-600 hover:bg-slate-300/80'
+                                    : 'text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-800 hover:text-slate-700'
                                 }`}
                               >
                                 {isClassFrozen ? (
-                                  <Lock className="w-2.5 h-2.5" />
+                                  <Lock className="w-3 h-3" />
                                 ) : (
-                                  <Unlock className="w-2.5 h-2.5 opacity-60" />
+                                  <Unlock className="w-3 h-3" />
                                 )}
                               </button>
                             </div>
@@ -1443,6 +2068,18 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                             Boolean(
                               slot && frozenSubjects.includes(slot.subject)
                             );
+
+                          // Check if this exact cell has any conflict or contradiction!
+                          const cellConflicts =
+                            conflictAnalysis.cellConflictMap.get(
+                              `${cls.id}__${slotKey}`
+                            ) || [];
+                          const primaryConflict = cellConflicts[0];
+                          const hasCriticalConflict = cellConflicts.some(
+                            (c) => c.severity === 'critical'
+                          );
+                          const hasWarningConflict =
+                            !hasCriticalConflict && cellConflicts.length > 0;
 
                           const intercalInfo = intercalatedCellMap.get(
                             `${cls.name}__${slotKey}`
@@ -1481,35 +2118,39 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                           const visual = slot
                             ? getSubjectVisualStyle(slot.subject)
                             : {
-                                bgHex: '#e2e8f0',
-                                textHex: '#64748b',
-                                borderHex: '#94a3b8',
+                                bgHex: darkMode ? '#0f172a' : '#f8fafc',
+                                textHex: darkMode ? '#64748b' : '#94a3b8',
+                                borderHex: '#cbd5e1',
                               };
 
-                          // Overlay for either Row Switch OR Side Card Manual Placement
-                          let switchOverlayClass = '';
+                          // Overlay for Row Switch, Side Card Placement, OR Conflict Signaling
+                          let cellRingClass = '';
                           if (isSideCardTargetRow && sideCompat) {
                             if (sideCompat.status === 'free_logical') {
-                              switchOverlayClass =
+                              cellRingClass =
                                 'ring-2 ring-inset ring-emerald-600 bg-emerald-100! cursor-pointer hover:brightness-95';
                             } else if (sideCompat.status === 'swap_logical') {
-                              switchOverlayClass =
+                              cellRingClass =
                                 'ring-2 ring-inset ring-amber-500 cursor-pointer hover:brightness-105';
                             } else {
-                              switchOverlayClass =
-                                'opacity-30 cursor-not-allowed';
+                              cellRingClass = 'opacity-30 cursor-not-allowed';
                             }
                           } else if (isRowActive && !isSourceCell && compat) {
                             if (compat.status === 'optimal') {
-                              switchOverlayClass =
-                                'ring-2 ring-inset ring-emerald-500 cursor-pointer hover:brightness-105';
+                              cellRingClass =
+                                'ring-2 ring-inset ring-emerald-600 cursor-pointer hover:brightness-105';
                             } else if (compat.status === 'possible_warn') {
-                              switchOverlayClass =
+                              cellRingClass =
                                 'ring-2 ring-inset ring-amber-500 cursor-pointer';
                             } else {
-                              switchOverlayClass =
-                                'opacity-35 cursor-not-allowed';
+                              cellRingClass = 'opacity-35 cursor-not-allowed';
                             }
+                          } else if (hasCriticalConflict) {
+                            cellRingClass =
+                              'ring-3 ring-inset ring-rose-600 z-10';
+                          } else if (hasWarningConflict) {
+                            cellRingClass =
+                              'ring-2 ring-inset ring-amber-500 z-10';
                           }
 
                           return (
@@ -1570,11 +2211,17 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                               style={{
                                 backgroundColor: slot
                                   ? visual.bgHex
-                                  : '#e2e8f0',
+                                  : darkMode
+                                  ? '#0f172a'
+                                  : '#f8fafc',
                                 color: visual.textHex,
                               }}
                               title={
-                                isSideCardTargetRow && sideCompat
+                                cellConflicts.length > 0
+                                  ? `⚠️ CONFLIT DÉTECTÉ :\n${cellConflicts
+                                      .map((c) => `• ${c.title}: ${c.description}`)
+                                      .join('\n')}\n(Cliquez sur la case pour voir les solutions vertes sans conflit)`
+                                  : isSideCardTargetRow && sideCompat
                                   ? `[Placement ${selectedSideCard?.subject}] ${sideCompat.reason}`
                                   : compat && isRowActive && !isSourceCell
                                   ? `[Switch ${
@@ -1586,34 +2233,54 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                   ? `${cls.name} · ${day} P${period} (${getPeriodClockTime(
                                       cls.section,
                                       period
-                                    )})\nMatière : ${slot.subject} (${
+                                    )})\nMatière : ${slot.subject}\nEnseignant : ${
                                       slot.teacher
-                                    })\n(Clic = Sélectionner/Permuter · Glisser vers "Matières à côté" pour retirer · Double-clic = Éditer)`
-                                  : `${cls.name} · ${day} P${period} — Libre`
+                                    }`
+                                  : `${cls.name} · ${day} P${period} — Créneau libre`
                               }
-                              className={`border border-slate-600 px-0.5 py-0.5 text-center align-middle relative transition-all cursor-pointer ${
+                              className={`border-b border-r px-1 py-0.5 text-center align-middle relative transition-all cursor-pointer ${
+                                darkMode
+                                  ? 'border-slate-700'
+                                  : 'border-slate-300'
+                              } ${
                                 period === 8
-                                  ? 'border-r-2 border-r-slate-900'
+                                  ? darkMode
+                                    ? 'border-r-2 border-r-slate-500'
+                                    : 'border-r-2 border-r-slate-400'
+                                  : period === 4
+                                  ? darkMode
+                                    ? 'border-r-2 border-r-slate-700'
+                                    : 'border-r-2 border-r-slate-300'
                                   : ''
                               } ${
                                 isSourceCell
                                   ? 'ring-3 ring-inset ring-slate-950 scale-[1.03] z-20 shadow-md'
-                                  : switchOverlayClass
+                                  : cellRingClass
                               } ${isDimmed ? 'opacity-20' : ''}`}
                             >
-                              {isLocked && (
-                                <Lock className="w-2.5 h-2.5 absolute top-0.5 right-0.5 opacity-75" />
+                              {/* Top-Left / Top-Full Alert Banner when Cell has a Conflict or Contradiction */}
+                              {primaryConflict && (
+                                <div
+                                  className={`w-full text-[8.5px] font-extrabold leading-none py-0.5 px-0.5 rounded-t truncate mb-0.5 ${
+                                    hasCriticalConflict
+                                      ? 'bg-rose-600 text-white'
+                                      : 'bg-amber-500 text-slate-950'
+                                  }`}
+                                >
+                                  ⚠️ {primaryConflict.badgeLabel}
+                                </div>
                               )}
 
-                              {!isLocked && isAnyIntercalated && (
+                              {isLocked && !primaryConflict && (
+                                <Lock className="w-2.5 h-2.5 absolute top-0.5 right-0.5 opacity-60" />
+                              )}
+
+                              {!isLocked && !primaryConflict && isAnyIntercalated && (
                                 <span
-                                  className={`absolute top-0 right-0 px-0.5 text-[8px] font-extrabold leading-none rounded-bl ${
+                                  className={`absolute top-0 right-0 px-1 text-[8px] font-extrabold leading-none rounded-bl ${
                                     hasJointClass
-                                      ? 'bg-indigo-900 text-white'
-                                      : intercalInfo?.kind ===
-                                        'cross_section_bell_overlap'
-                                      ? 'bg-red-700 text-white'
-                                      : 'bg-slate-900/80 text-amber-300'
+                                      ? 'bg-indigo-800 text-white'
+                                      : 'bg-slate-800/85 text-amber-200'
                                   }`}
                                 >
                                   {hasJointClass ? '⊕' : '⇄'}
@@ -1623,12 +2290,12 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                               {/* Badge when placing a Side Card */}
                               {isSideCardTargetRow && sideCompat && (
                                 <span
-                                  className={`absolute bottom-0 right-0 px-0.5 text-[8px] font-mono font-extrabold leading-none ${
+                                  className={`absolute bottom-0 right-0 px-1 text-[8.5px] font-mono font-extrabold leading-none ${
                                     sideCompat.status === 'free_logical'
                                       ? 'bg-emerald-700 text-white'
                                       : sideCompat.status === 'swap_logical'
                                       ? 'bg-amber-600 text-white'
-                                      : 'bg-red-700 text-white'
+                                      : 'bg-rose-700 text-white'
                                   }`}
                                 >
                                   {sideCompat.status === 'free_logical'
@@ -1645,12 +2312,12 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                 !isSourceCell &&
                                 compat && (
                                   <span
-                                    className={`absolute bottom-0 right-0 px-0.5 text-[8px] font-mono font-extrabold leading-none ${
+                                    className={`absolute bottom-0 right-0 px-1 text-[8.5px] font-mono font-extrabold leading-none ${
                                       compat.status === 'optimal'
                                         ? 'bg-emerald-700 text-white'
                                         : compat.status === 'possible_warn'
                                         ? 'bg-amber-600 text-white'
-                                        : 'bg-red-700 text-white'
+                                        : 'bg-rose-700 text-white'
                                     }`}
                                   >
                                     {compat.status === 'optimal'
@@ -1662,31 +2329,45 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                                 )}
 
                               {slot ? (
-                                <div className="flex flex-col justify-center items-center h-full overflow-hidden leading-none">
-                                  <div className="text-[10px] font-extrabold tracking-tight truncate w-full">
+                                <div className="flex flex-col justify-center items-center h-full overflow-hidden leading-tight">
+                                  <div
+                                    className={`${
+                                      gridDensity === 'large'
+                                        ? 'text-xs'
+                                        : gridDensity === 'comfort'
+                                        ? 'text-[11px]'
+                                        : 'text-[10px]'
+                                    } font-extrabold tracking-tight truncate w-full`}
+                                  >
                                     {slot.subject}
                                   </div>
                                   {slot.subSubject && (
-                                    <div className="text-[8.5px] font-bold truncate w-full border-t border-current/25 mt-0.5 pt-0.5">
+                                    <div className="text-[9px] font-bold truncate w-full border-t border-current/25 mt-0.5 pt-0.5">
                                       {slot.subSubject}
                                     </div>
                                   )}
                                   {showTeacherSubtext && !slot.subSubject && (
-                                    <div className="text-[8.5px] font-medium opacity-85 truncate w-full mt-0.5">
+                                    <div
+                                      className={`${
+                                        gridDensity === 'large'
+                                          ? 'text-[10.5px]'
+                                          : 'text-[9.5px]'
+                                      } font-semibold opacity-90 truncate w-full mt-0.5`}
+                                    >
                                       {slot.teacher}
                                       {slot.assistantTeacher
-                                        ? ` +Ass.${slot.assistantTeacher}`
+                                        ? ` +${slot.assistantTeacher}`
                                         : ''}
                                     </div>
                                   )}
                                 </div>
                               ) : isSideCardTargetRow &&
                                 sideCompat?.status === 'free_logical' ? (
-                                <div className="text-[9px] font-extrabold text-emerald-800">
+                                <div className="text-[10px] font-extrabold text-emerald-800">
                                   + Placer
                                 </div>
                               ) : (
-                                <div className="text-[9px] text-slate-400">
+                                <div className="text-[10px] text-slate-300 dark:text-slate-700">
                                   —
                                 </div>
                               )}
@@ -1703,7 +2384,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
         </div>
 
         {/* RIGHT COLUMN: BAC DES MATIÈRES À CÔTÉ (RÉSERVE MANUELLE & SANS PLACE LOGIQUE) */}
-        {showSideTray && (
+        {showSideTray && !isFullHeightGrid && (
           <aside
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
@@ -1714,17 +2395,17 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                 setSelectedSource(null);
               }
             }}
-            className={`lg:col-span-3 border-2 rounded-xl p-3 space-y-3 flex flex-col max-h-[680px] ${
+            className={`lg:col-span-3 border rounded-xl p-3.5 space-y-3 flex flex-col max-h-[680px] ${
               darkMode
-                ? 'bg-slate-900 border-indigo-800 text-slate-100'
-                : 'bg-white border-indigo-200 text-slate-900 shadow-xs'
+                ? 'bg-slate-900 border-slate-700 text-slate-100'
+                : 'bg-white border-slate-300 text-slate-900 shadow-2xs'
             }`}
           >
             {/* Header of Side Tray */}
-            <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-200 dark:border-slate-800">
+            <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-slate-200 dark:border-slate-800">
               <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-md bg-indigo-600 text-white flex items-center justify-center shrink-0">
-                  <Inbox className="w-3.5 h-3.5" />
+                <div className="w-7 h-7 rounded-lg bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                  <Inbox className="w-4 h-4" />
                 </div>
                 <div>
                   <h3 className="text-xs font-extrabold tracking-tight">
@@ -1741,7 +2422,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                   type="button"
                   onClick={onAutoPlaceSideTrayCards}
                   title="Placer automatiquement toutes les cartes qui ont une place logique libre"
-                  className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
                 >
                   <Check className="w-3 h-3" />
                   <span>Placer Auto</span>
@@ -1769,7 +2450,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                   value={newTrayClassId}
                   onChange={(e) => setNewTrayClassId(e.target.value)}
                   aria-label="Classe pour matière à côté"
-                  className={`px-2 py-1 text-xs border rounded ${
+                  className={`px-2 py-1 text-xs border rounded-md ${
                     darkMode
                       ? 'bg-slate-900 border-slate-700 text-white'
                       : 'bg-white border-slate-300 text-slate-900'
@@ -1793,7 +2474,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                         Math.max(1, Math.min(10, Number(e.target.value) || 1))
                       )
                     }
-                    className={`w-12 px-1.5 py-1 text-xs border rounded text-center font-mono ${
+                    className={`w-12 px-1.5 py-1 text-xs border rounded-md text-center font-mono tabular-nums ${
                       darkMode
                         ? 'bg-slate-900 border-slate-700 text-white'
                         : 'bg-white border-slate-300 text-slate-900'
@@ -1811,7 +2492,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                   value={newTraySubject}
                   onChange={(e) => handleSelectTraySubject(e.target.value)}
                   placeholder="Matière (ex: Maths)"
-                  className={`px-2 py-1 text-xs border rounded ${
+                  className={`px-2 py-1 text-xs border rounded-md ${
                     darkMode
                       ? 'bg-slate-900 border-slate-700 text-white'
                       : 'bg-white border-slate-300 text-slate-900'
@@ -1829,7 +2510,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                   value={newTrayTeacher}
                   onChange={(e) => setNewTrayTeacher(e.target.value)}
                   placeholder="Enseignant"
-                  className={`px-2 py-1 text-xs border rounded ${
+                  className={`px-2 py-1 text-xs border rounded-md ${
                     darkMode
                       ? 'bg-slate-900 border-slate-700 text-white'
                       : 'bg-white border-slate-300 text-slate-900'
@@ -1853,10 +2534,10 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                     periodsCount: newTrayPeriods,
                   });
                 }}
-                className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
+                className="w-full py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
-                <span>Ajouter à côté pour placer manuellement</span>
+                <span>Ajouter à côté pour placer</span>
               </button>
             </div>
 
@@ -1866,7 +2547,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                 value={sideTrayFilterClassId}
                 onChange={(e) => setSideTrayFilterClassId(e.target.value)}
                 aria-label="Filtrer la réserve par classe"
-                className={`flex-1 px-2 py-1 text-xs border rounded ${
+                className={`flex-1 px-2 py-1 text-xs border rounded-md ${
                   darkMode
                     ? 'bg-slate-800 border-slate-700 text-slate-200'
                     : 'bg-slate-50 border-slate-300 text-slate-800'
@@ -1909,8 +2590,8 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                     Aucune matière en attente à côté
                   </div>
                   <p className="text-[11px] mt-1">
-                    Cliquez sur une séance de la grille puis sur{" "}
-                    <strong>« Mettre à côté »</strong>, ou ajoutez une matière ci-dessus. Lors d'une génération, les séances sans place logique restent ici.
+                    Cliquez sur une séance de la grille puis sur{' '}
+                    <strong>« Mettre à côté »</strong>, ou ajoutez une matière ci-dessus.
                   </p>
                 </div>
               ) : (
@@ -1935,7 +2616,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                           isCardSelected ? null : card.id
                         );
                       }}
-                      className={`p-2 rounded-lg border-2 transition-all cursor-pointer select-none ${
+                      className={`p-2.5 rounded-lg border transition-all cursor-pointer select-none ${
                         isCardSelected
                           ? 'ring-2 ring-emerald-500 border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/40'
                           : darkMode
@@ -1950,7 +2631,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                               backgroundColor: visual.bgHex,
                               color: visual.textHex,
                             }}
-                            className="px-2 py-0.5 rounded text-[11px] font-extrabold truncate border border-black/15"
+                            className="px-2 py-0.5 rounded text-[11px] font-extrabold truncate border border-black/10"
                           >
                             {card.subject}
                           </span>
@@ -1969,7 +2650,7 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
                             onRemoveUnplacedCard(card.id);
                           }}
                           title="Supprimer cette carte"
-                          className="text-slate-400 hover:text-rose-600 p-0.5"
+                          className="text-slate-400 hover:text-rose-600 p-0.5 cursor-pointer"
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>
@@ -1997,187 +2678,6 @@ export const MasterEnsembleMatrix: React.FC<MasterEnsembleMatrixProps> = ({
               )}
             </div>
           </aside>
-        )}
-      </div>
-
-      {/* =====================================================================
-          4. BOTTOM DOCK (Selected Slot Actions + "Mettre à côté" Button + Smart Switch)
-         ===================================================================== */}
-      <div className="bg-[#5c6470] text-white rounded-md p-3 shadow-md flex flex-wrap items-center justify-between gap-4">
-        {selectedSource && activeSourceClass ? (
-          <>
-            {/* Left: Selected Subject Card */}
-            <div className="flex items-center gap-3">
-              <div
-                style={{
-                  backgroundColor: activeSourceSlot
-                    ? getSubjectVisualStyle(activeSourceSlot.subject).bgHex
-                    : '#94a3b8',
-                  color: activeSourceSlot
-                    ? getSubjectVisualStyle(activeSourceSlot.subject).textHex
-                    : '#0f172a',
-                }}
-                className="w-16 h-14 rounded border-2 border-white flex flex-col items-center justify-center p-1 text-center shrink-0 shadow-sm"
-              >
-                <span className="text-[11px] font-extrabold leading-tight truncate w-full">
-                  {activeSourceSlot?.subject || 'Libre'}
-                </span>
-                <span className="text-[9px] font-bold opacity-85 truncate w-full mt-0.5">
-                  {activeSourceClass.name}
-                </span>
-              </div>
-
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-lg font-extrabold text-yellow-300 tracking-tight">
-                    {activeSourceSlot?.subject || 'Créneau Libre'}
-                  </span>
-                  <span className="text-xs font-mono bg-slate-800/80 px-2 py-0.5 rounded text-sky-300">
-                    {activeSourceClass.name} ·{' '}
-                    {selectedSource.slotKey.replace('_', ' P')} (
-                    {getPeriodClockTime(
-                      activeSourceClass.section,
-                      Number(selectedSource.slotKey.split('_')[1])
-                    )}
-                    )
-                  </span>
-                </div>
-                <div className="text-xs text-slate-200 mt-0.5 flex flex-wrap items-center gap-2">
-                  <span>
-                    Enseignant :{' '}
-                    <strong>{activeSourceSlot?.teacher || 'Aucun'}</strong>
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Center: Hovered Candidate Diagnostics OR Top Recommended Switches */}
-            <div className="flex-1 min-w-[260px]">
-              {hoveredCandidate &&
-              hoveredCandidate.targetKey !== selectedSource.slotKey ? (
-                <div
-                  className={`p-2 rounded border text-xs ${
-                    hoveredCandidate.status === 'optimal'
-                      ? 'bg-emerald-950/90 border-emerald-400 text-emerald-100'
-                      : hoveredCandidate.status === 'possible_warn'
-                      ? 'bg-amber-950/90 border-amber-400 text-amber-100'
-                      : 'bg-red-950/90 border-red-400 text-red-100'
-                  }`}
-                >
-                  <div className="font-bold flex items-center justify-between">
-                    <span>
-                      Cible : {hoveredCandidate.day} P{hoveredCandidate.period}{' '}
-                      ({hoveredCandidate.targetSlot?.subject || 'Libre'} —{' '}
-                      {hoveredCandidate.targetSlot?.teacher || 'Aucun'})
-                    </span>
-                    <span className="font-mono">
-                      {hoveredCandidate.status === 'blocked'
-                        ? 'BLOQUÉ'
-                        : `Score ${
-                            hoveredCandidate.scoreDelta >= 0 ? '+' : ''
-                          }${hoveredCandidate.scoreDelta}`}
-                    </span>
-                  </div>
-                  <div className="text-[11px] mt-0.5">
-                    {hoveredCandidate.reason}
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  <div className="text-[11px] font-semibold text-yellow-200 flex items-center gap-1">
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>
-                      Cliquez sur une case verte de la ligne{' '}
-                      {activeSourceClass.name} pour permuter, ou mettez cette matière à côté :
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {topRecommendedSwitches.map((rec) => (
-                      <button
-                        key={rec.targetKey}
-                        onClick={() => {
-                          onSwitchSlots(
-                            activeSourceClass.id,
-                            selectedSource.slotKey,
-                            rec.targetKey
-                          );
-                          setSelectedSource(null);
-                        }}
-                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-semibold flex items-center gap-1 shadow-xs transition-colors cursor-pointer"
-                      >
-                        <ArrowLeftRight className="w-3 h-3" />
-                        <span>
-                          {rec.day} P{rec.period} (
-                          {rec.targetSlot?.subject || 'Libre'})
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Right: "Mettre à côté" + Edit + Cancel Actions */}
-            <div className="flex items-center gap-2 shrink-0">
-              {activeSourceSlot && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onMoveSlotToSideTray(
-                      activeSourceClass.id,
-                      selectedSource.slotKey
-                    );
-                    setShowSideTray(true);
-                    setSelectedSource(null);
-                  }}
-                  className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded text-xs font-bold flex items-center gap-1.5 shadow-xs cursor-pointer"
-                  title="Retirer cette séance de la grille et la garder à côté de la Vue d'Ensemble pour la placer manuellement"
-                >
-                  <span>Mettre à côté</span>
-                  <ArrowRight className="w-3.5 h-3.5" />
-                </button>
-              )}
-
-              <button
-                onClick={() => {
-                  const [dStr, pStr] = selectedSource.slotKey.split('_');
-                  onEditCell(
-                    activeSourceClass.id,
-                    dStr as DayOfWeek,
-                    Number(pStr),
-                    activeSourceSlot
-                  );
-                }}
-                className="px-3 py-1.5 bg-white text-slate-900 hover:bg-slate-100 rounded text-xs font-bold cursor-pointer"
-              >
-                Éditer
-              </button>
-              <button
-                onClick={() => setSelectedSource(null)}
-                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded text-xs font-medium cursor-pointer"
-              >
-                Annuler
-              </button>
-            </div>
-          </>
-        ) : (
-          <div className="w-full flex flex-wrap items-center justify-between gap-2 text-xs">
-            <div className="flex items-center gap-3">
-              <span className="font-extrabold text-yellow-300 text-sm">
-                Vue d'Ensemble Interactive
-              </span>
-              <span className="text-slate-200">
-                Cliquez sur une séance pour permuter ou la{' '}
-                <strong>Mettre à côté</strong> · Cliquez sur une carte dans{' '}
-                <strong>Matières à Côté</strong> à droite pour la placer manuellement · Cliquez sur{' '}
-                <strong>🔒</strong> à gauche d'une classe pour garder ses positions.
-              </span>
-            </div>
-            <div className="font-mono text-[11px] bg-slate-700/80 px-2.5 py-1 rounded text-slate-200">
-              {filteredClasses.length} classes · {frozenClassIds.length} figée(s) ·{' '}
-              {unplacedLessons.length} matière(s) à côté
-            </div>
-          </div>
         )}
       </div>
     </div>

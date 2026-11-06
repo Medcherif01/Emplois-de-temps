@@ -2099,3 +2099,473 @@ export function generatePrintableEnsembleHtml(
 </body>
 </html>`;
 }
+
+export type ConflictOrContradictionKind =
+  | 'double_booking'
+  | 'bell_break_overlap'
+  | 'unavailable_slot'
+  | 'multi_dept_half_day'
+  | 'teacher_overload';
+
+export interface DetailedConflictItem {
+  id: string;
+  kind: ConflictOrContradictionKind;
+  severity: 'critical' | 'warning';
+  badgeLabel: string;
+  title: string;
+  description: string;
+  teacher: string;
+  day?: DayOfWeek;
+  period?: number;
+  classIds: string[];
+  classNames: string[];
+  cellKeys: string[]; // Format: `${classId}__${day}_${period}`
+  canAutoResolve: boolean;
+}
+
+/**
+ * Detects ALL conflicts and contradictions across the entire school schedule:
+ * 1. Double-booking (same teacher in 2 classes at the same day & period)
+ * 2. Cross-section bell / break overlap (teacher in 2 sections whose real clock times intersect)
+ * 3. Teacher or Class unavailability violation (scheduled on a forbidden ✕ slot)
+ * 4. Multi-department half-day contradiction (teacher switching between 2 official departments within the same morning P1-P4 or afternoon P5-P8)
+ * 5. Teacher weekly overload (assigned periods > maxPeriodsPerWeek)
+ */
+export function detectAllConflictsAndContradictions(
+  classes: SchoolClass[],
+  teachers: TeacherProfile[]
+): {
+  items: DetailedConflictItem[];
+  cellConflictMap: Map<string, DetailedConflictItem[]>;
+  classConflictCountMap: Map<string, number>;
+} {
+  const items: DetailedConflictItem[] = [];
+  const cellConflictMap = new Map<string, DetailedConflictItem[]>();
+  const classConflictCountMap = new Map<string, number>();
+
+  const registerItem = (item: DetailedConflictItem) => {
+    items.push(item);
+    for (const ck of item.cellKeys) {
+      if (!cellConflictMap.has(ck)) {
+        cellConflictMap.set(ck, []);
+      }
+      cellConflictMap.get(ck)!.push(item);
+    }
+    for (const cid of item.classIds) {
+      classConflictCountMap.set(cid, (classConflictCountMap.get(cid) || 0) + 1);
+    }
+  };
+
+  const normalizedTeachers = normalizeIndividualTeachersList(teachers, classes);
+  const teacherByName = new Map<string, TeacherProfile>();
+  normalizedTeachers.forEach((t) =>
+    teacherByName.set(t.name.trim().toLowerCase(), t)
+  );
+
+  // 1. Track occupancy per (teacher, day, period) for Double Booking & Unavailability
+  const slotOccupancy = new Map<
+    string,
+    Array<{
+      cls: SchoolClass;
+      slot: LessonSlot;
+      day: DayOfWeek;
+      period: number;
+      slotKey: string;
+    }>
+  >();
+
+  // Also track per (teacher, day) for Bell Overlaps & Multi-Department Half-Day Contradictions
+  const teacherDaySchedule = new Map<
+    string,
+    Array<{
+      teacherDisplay: string;
+      cls: SchoolClass;
+      dept: Exclude<SchoolCategory, 'ALL'>;
+      slot: LessonSlot;
+      day: DayOfWeek;
+      period: number;
+      slotKey: string;
+      timeStr: string;
+      minutes: [number, number] | null;
+    }>
+  >();
+
+  for (const cls of classes) {
+    const classUnavail = new Set(cls.unavailableSlots || []);
+    const dept = getClassOfficialDepartment(cls);
+
+    for (const [slotKey, slot] of Object.entries(cls.slots)) {
+      if (!slot || !slot.subject) continue;
+      const [dayStr, pStr] = slotKey.split('_');
+      const day = dayStr as DayOfWeek;
+      const period = Number(pStr);
+      const timeStr = getPeriodClockTime(cls.section, period);
+      const minutes = parseTimeWindowMinutes(timeStr);
+
+      const allParticipants = [
+        ...splitSlotTeachers(slot.teacher),
+        ...splitSlotTeachers(slot.subTeacher),
+        ...splitSlotTeachers(slot.assistantTeacher),
+      ];
+
+      // Check class unavailability
+      if (classUnavail.has(slotKey)) {
+        registerItem({
+          id: `cls_unavail_${cls.id}_${slotKey}`,
+          kind: 'unavailable_slot',
+          severity: 'critical',
+          badgeLabel: 'CLASSE FERMÉE',
+          title: `Créneau fermé pour ${cls.name} (${day} P${period})`,
+          description: `La séance ${slot.subject} (${slot.teacher}) est placée le ${day} P${period} alors que la classe ${cls.name} est marquée indisponible sur ce créneau.`,
+          teacher: slot.teacher,
+          day,
+          period,
+          classIds: [cls.id],
+          classNames: [cls.name],
+          cellKeys: [`${cls.id}__${slotKey}`],
+          canAutoResolve: true,
+        });
+      }
+
+      for (const tClean of allParticipants) {
+        const tNorm = tClean.toLowerCase();
+
+        // Check teacher unavailability
+        const profile = teacherByName.get(tNorm);
+        if (profile && (profile.unavailableSlots || []).includes(slotKey)) {
+          registerItem({
+            id: `unavail_${profile.id}_${cls.id}_${slotKey}`,
+            kind: 'unavailable_slot',
+            severity: 'critical',
+            badgeLabel: 'INDISPONIBLE ✕',
+            title: `Indisponibilité non respectée : ${tClean} (${day} P${period})`,
+            description: `${tClean} est marqué(e) indisponible (✕) le ${day} en Période ${period} (${timeStr}), mais un cours de ${slot.subject} est programmé en ${cls.name}.`,
+            teacher: tClean,
+            day,
+            period,
+            classIds: [cls.id],
+            classNames: [cls.name],
+            cellKeys: [`${cls.id}__${slotKey}`],
+            canAutoResolve: true,
+          });
+        }
+
+        const occKey = `${tNorm}__${slotKey}`;
+        if (!slotOccupancy.has(occKey)) {
+          slotOccupancy.set(occKey, []);
+        }
+        slotOccupancy.get(occKey)!.push({
+          cls,
+          slot,
+          day,
+          period,
+          slotKey,
+        });
+
+        const dayKey = `${tNorm}__${day}`;
+        if (!teacherDaySchedule.has(dayKey)) {
+          teacherDaySchedule.set(dayKey, []);
+        }
+        teacherDaySchedule.get(dayKey)!.push({
+          teacherDisplay: tClean,
+          cls,
+          dept,
+          slot,
+          day,
+          period,
+          slotKey,
+          timeStr,
+          minutes,
+        });
+      }
+    }
+  }
+
+  // Evaluate 1B: Double Bookings at exact same (day, period)
+  for (const [occKey, entries] of slotOccupancy.entries()) {
+    if (entries.length <= 1) continue;
+
+    // Check if all classes are intentionally joined via jointWithClasses
+    if (entries.length === 2) {
+      const [a, b] = entries;
+      const aJoinsB = a.slot.jointWithClasses?.some(
+        (jc) => jc.trim().toLowerCase() === b.cls.name.trim().toLowerCase()
+      );
+      const bJoinsA = b.slot.jointWithClasses?.some(
+        (jc) => jc.trim().toLowerCase() === a.cls.name.trim().toLowerCase()
+      );
+      if (aJoinsB || bJoinsA) continue;
+    }
+
+    const first = entries[0];
+    const teacherName =
+      splitSlotTeachers(first.slot.teacher).find(
+        (t) => t.toLowerCase() === occKey.split('__')[0]
+      ) || first.slot.teacher;
+    const classNames = entries.map((e) => e.cls.name);
+    const classIds = entries.map((e) => e.cls.id);
+    const cellKeys = entries.map((e) => `${e.cls.id}__${e.slotKey}`);
+    const subjectsList = Array.from(new Set(entries.map((e) => e.slot.subject))).join(' / ');
+
+    registerItem({
+      id: `dbl_${occKey}`,
+      kind: 'double_booking',
+      severity: 'critical',
+      badgeLabel: 'DOUBLON PROF',
+      title: `Conflit de doublon : ${teacherName} dans ${entries.length} classes (${first.day} P${first.period})`,
+      description: `${teacherName} est programmé(e) simultanément en ${classNames.join(' et ')} le ${first.day} en Période ${first.period} (${subjectsList}).`,
+      teacher: teacherName,
+      day: first.day,
+      period: first.period,
+      classIds,
+      classNames,
+      cellKeys,
+      canAutoResolve: true,
+    });
+  }
+
+  // Evaluate 2: Cross-section Bell / Break Overlaps & Multi-Department Half-Day Contradictions
+  for (const [dayKey, dayEntries] of teacherDaySchedule.entries()) {
+    if (dayEntries.length < 2) continue;
+
+    // 2A. Cross-section bell/break overlap on different periods (or different sections)
+    for (let i = 0; i < dayEntries.length; i++) {
+      for (let j = i + 1; j < dayEntries.length; j++) {
+        const a = dayEntries[i];
+        const b = dayEntries[j];
+        if (a.cls.id === b.cls.id) continue;
+        // Skip if already caught as same-period double booking
+        if (a.period === b.period) continue;
+        if (a.cls.section === b.cls.section) continue;
+        if (!a.minutes || !b.minutes) continue;
+
+        const [startA, endA] = a.minutes;
+        const [startB, endB] = b.minutes;
+        const overlapMin = Math.min(endA, endB) - Math.max(startA, startB);
+        if (overlapMin > 0) {
+          registerItem({
+            id: `bell_${dayKey}_${a.cls.id}_P${a.period}_${b.cls.id}_P${b.period}`,
+            kind: 'bell_break_overlap',
+            severity: 'critical',
+            badgeLabel: 'CHEVAUCHEMENT PAUSE',
+            title: `Intersection d'horaires / pause : ${a.teacherDisplay} (${a.day} P${a.period} ⇄ P${b.period})`,
+            description: `Chevauchement de ${overlapMin} min dû aux pauses décalées : ${a.teacherDisplay} est en ${a.cls.name} (P${a.period}: ${a.timeStr}) et en ${b.cls.name} (P${b.period}: ${b.timeStr}).`,
+            teacher: a.teacherDisplay,
+            day: a.day,
+            period: a.period,
+            classIds: [a.cls.id, b.cls.id],
+            classNames: [a.cls.name, b.cls.name],
+            cellKeys: [`${a.cls.id}__${a.slotKey}`, `${b.cls.id}__${b.slotKey}`],
+            canAutoResolve: true,
+          });
+        }
+      }
+    }
+
+    // 2B. Multi-department within the same half-day (Morning P1-P4 vs Afternoon P5-P8)
+    const morningEntries = dayEntries.filter((e) => e.period <= 4);
+    const afternoonEntries = dayEntries.filter((e) => e.period >= 5);
+
+    const morningDepts = Array.from(new Set(morningEntries.map((e) => e.dept)));
+    if (morningDepts.length > 1) {
+      const tName = morningEntries[0].teacherDisplay;
+      const day = morningEntries[0].day;
+      const deptLabels = morningDepts.map((d) => CATEGORY_SHORT_LABELS[d]);
+      registerItem({
+        id: `multidept_am_${dayKey}`,
+        kind: 'multi_dept_half_day',
+        severity: 'warning',
+        badgeLabel: '2 DÉPTS MATIN',
+        title: `2 départements dans la même matinée : ${tName} (${day} P1–P4)`,
+        description: `${tName} enseigne dans ${deptLabels.join(' et ')} durant la même matinée (${day} P1–P4) au lieu d'être organisé(e) Matin = Dépt 1 / Après-midi = Dépt 2.`,
+        teacher: tName,
+        day,
+        period: morningEntries[morningEntries.length - 1].period,
+        classIds: Array.from(new Set(morningEntries.map((e) => e.cls.id))),
+        classNames: Array.from(new Set(morningEntries.map((e) => e.cls.name))),
+        cellKeys: morningEntries.map((e) => `${e.cls.id}__${e.slotKey}`),
+        canAutoResolve: true,
+      });
+    }
+
+    const afternoonDepts = Array.from(
+      new Set(afternoonEntries.map((e) => e.dept))
+    );
+    if (afternoonDepts.length > 1) {
+      const tName = afternoonEntries[0].teacherDisplay;
+      const day = afternoonEntries[0].day;
+      const deptLabels = afternoonDepts.map((d) => CATEGORY_SHORT_LABELS[d]);
+      registerItem({
+        id: `multidept_pm_${dayKey}`,
+        kind: 'multi_dept_half_day',
+        severity: 'warning',
+        badgeLabel: '2 DÉPTS APRÈS-MIDI',
+        title: `2 départements dans le même après-midi : ${tName} (${day} P5–P8)`,
+        description: `${tName} enseigne dans ${deptLabels.join(' et ')} durant le même après-midi (${day} P5–P8) au lieu d'être organisé(e) Matin = Dépt 1 / Après-midi = Dépt 2.`,
+        teacher: tName,
+        day,
+        period: afternoonEntries[afternoonEntries.length - 1].period,
+        classIds: Array.from(new Set(afternoonEntries.map((e) => e.cls.id))),
+        classNames: Array.from(new Set(afternoonEntries.map((e) => e.cls.name))),
+        cellKeys: afternoonEntries.map((e) => `${e.cls.id}__${e.slotKey}`),
+        canAutoResolve: true,
+      });
+    }
+  }
+
+  // Evaluate 3: Teacher weekly overload
+  const loadRows = computeTeachersLoadReport(teachers, classes, 'ALL');
+  for (const row of loadRows) {
+    if (row.totalPeriods > row.maxPeriods) {
+      registerItem({
+        id: `overload_${row.teacherId}`,
+        kind: 'teacher_overload',
+        severity: 'warning',
+        badgeLabel: 'SURCHARGE MAX',
+        title: `Dépassement de charge max : ${row.teacherName} (${row.totalPeriods} / ${row.maxPeriods} séances)`,
+        description: `${row.teacherName} assure ${row.totalPeriods} séances/semaine alors que son plafond est fixé à ${row.maxPeriods} séances (+${row.totalPeriods - row.maxPeriods} séance(s)).`,
+        teacher: row.teacherName,
+        classIds: row.classBreakdown.map((b) => b.classId),
+        classNames: Array.from(
+          new Set(row.classBreakdown.map((b) => b.className))
+        ),
+        cellKeys: [],
+        canAutoResolve: false,
+      });
+    }
+  }
+
+  // Sort: critical first, then warnings
+  items.sort((a, b) => {
+    if (a.severity !== b.severity) {
+      return a.severity === 'critical' ? -1 : 1;
+    }
+    return a.title.localeCompare(b.title);
+  });
+
+  return { items, cellConflictMap, classConflictCountMap };
+}
+
+/**
+ * Automatically resolves one specific conflict/contradiction (or ALL of them)
+ * by finding a 100% conflict-free slot or swap within the affected class,
+ * or safely moving the conflicting session to "Matières à Côté" if no logical slot exists.
+ */
+export function autoResolveConflictsInSchedule(params: {
+  classes: SchoolClass[];
+  teachers: TeacherProfile[];
+  unplacedLessons: Array<{
+    id: string;
+    classId: string;
+    className: string;
+    subject: string;
+    teacher: string;
+    assistantTeacher?: string;
+    subSubject?: string;
+    subTeacher?: string;
+    room?: string;
+    groupName?: string;
+    reason?: string;
+  }>;
+  lockedSlotsByClass: Record<string, string[]>;
+  targetConflictId?: string;
+}): {
+  classes: SchoolClass[];
+  unplacedLessons: typeof params.unplacedLessons;
+  resolvedCount: number;
+  movedToTrayCount: number;
+} {
+  const nextClasses = params.classes.map((c) => ({
+    ...c,
+    slots: { ...c.slots },
+  }));
+  const nextUnplaced = [...params.unplacedLessons];
+  let resolvedCount = 0;
+  let movedToTrayCount = 0;
+
+  const { items } = detectAllConflictsAndContradictions(
+    nextClasses,
+    params.teachers
+  );
+  const targets = params.targetConflictId
+    ? items.filter((i) => i.id === params.targetConflictId)
+    : items.filter((i) => i.canAutoResolve);
+
+  for (const conflict of targets) {
+    if (conflict.cellKeys.length === 0) continue;
+    // Pick the last cell in cellKeys (for a double-booking between Class A and Class B, we move Class B's slot)
+    const targetCellKey = conflict.cellKeys[conflict.cellKeys.length - 1];
+    const [classId, slotKey] = targetCellKey.split('__');
+    const cls = nextClasses.find((c) => c.id === classId);
+    if (!cls || !cls.slots[slotKey]) continue;
+
+    const lockedSet = new Set(params.lockedSlotsByClass[cls.id] || []);
+    const compatMap = evaluateRowSwitchCompatibility(
+      cls,
+      slotKey,
+      nextClasses,
+      params.teachers,
+      lockedSet
+    );
+
+    // Prefer an empty optimal slot first, or highest-scoring optimal swap
+    const candidates = Object.values(compatMap)
+      .filter(
+        (cand) =>
+          cand.targetKey !== slotKey &&
+          cand.status === 'optimal' &&
+          // If it's a multi-dept half-day contradiction, prefer switching to the opposite half-day!
+          (conflict.kind !== 'multi_dept_half_day' ||
+            (conflict.period && conflict.period <= 4
+              ? cand.period >= 5
+              : cand.period <= 4))
+      )
+      .sort((a, b) => {
+        const aEmpty = a.targetSlot ? 0 : 1;
+        const bEmpty = b.targetSlot ? 0 : 1;
+        if (aEmpty !== bEmpty) return bEmpty - aEmpty;
+        return b.scoreDelta - a.scoreDelta;
+      });
+
+    if (candidates.length > 0) {
+      const best = candidates[0];
+      const sourceSlot = cls.slots[slotKey];
+      const targetSlot = cls.slots[best.targetKey];
+      if (targetSlot) {
+        cls.slots[slotKey] = targetSlot;
+        cls.slots[best.targetKey] = sourceSlot;
+      } else {
+        delete cls.slots[slotKey];
+        cls.slots[best.targetKey] = sourceSlot;
+      }
+      resolvedCount++;
+    } else {
+      // No logical conflict-free place in this class -> move safely to "Matières à Côté"
+      const removed = cls.slots[slotKey];
+      delete cls.slots[slotKey];
+      nextUnplaced.unshift({
+        id: `autores_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        classId: cls.id,
+        className: cls.name,
+        subject: removed.subject,
+        teacher: removed.teacher,
+        assistantTeacher: removed.assistantTeacher,
+        subSubject: removed.subSubject,
+        subTeacher: removed.subTeacher,
+        room: removed.room || cls.room,
+        groupName: removed.groupName,
+        reason: `Mise à côté automatiquement pour éliminer : ${conflict.title}`,
+      });
+      movedToTrayCount++;
+      resolvedCount++;
+    }
+  }
+
+  return {
+    classes: nextClasses,
+    unplacedLessons: nextUnplaced,
+    resolvedCount,
+    movedToTrayCount,
+  };
+}
+
